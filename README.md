@@ -1,4 +1,4 @@
-# PointStock — pre-market analysis (milestones M1–M4)
+# PointStock — pre-market analysis (milestones M1–M5)
 
 Design: [DESIGN.md](DESIGN.md).
 
@@ -6,6 +6,7 @@ Design: [DESIGN.md](DESIGN.md).
 - **M2:** conditional base rates (with N), gap base rates on |gap| ≥ 1%, event-day band widening, curated event priors in `event_base_rates.json` (placeholders until you fill them).
 - **M3:** four direction models (logistic regression, random forest, RBF SVM, naive Bayes) scored by walk-forward validation (21-day windows over the last ~750 days) with Brier skill vs a training-up-rate baseline; ensemble weights ∝ max(0, BSS), else "no direction edge".
 - **M4:** news tier 1 (Yahoo + Google News, last 36h, relevance filter, Claude Haiku scoring with a keyword-lexicon fallback), Bayesian log-odds combiner → final P(up) with breakdown and agreement, forecast ledger (`data/forecast_ledger.csv`) with next-morning outcome filling and 60-day Brier skill scoring.
+- **M5:** tier-2 analyst panel for materiality-3 events (actor map, scenario tree, five independent personas on `claude-opus-5-5`, log-odds aggregate, disagreement score, expected value, tripwires that re-run it; history in `data/events/`), NYSE-calendar scheduling with cron, and push to Feishu / Telegram / email.
 
 ## Setup (conda)
 
@@ -39,3 +40,27 @@ keyword lexicon and the report says so. `--no-llm` forces the lexicon.
 DESIGN.md caps P(up) to 35–65%. When the prior itself is outside that range (a gap-day base rate,
 e.g. 14% of similar −4% gaps closed above the prior close), the cap becomes prior ± 15 points so an
 honest gap base rate is not pulled back toward 50%.
+
+## Unattended runs (M5)
+
+`scripts/run_premarket.sh` runs `python -m premarket.run --scheduled`: it skips NYSE holidays and
+weekends, runs only between 08:15 and 09:25 ET, once per session (stamp in `data/runs/<date>/DONE`),
+then pushes the summary. The machine clock is Singapore time, so cron fires at both 20:30 and 21:30
+(08:30 ET in summer and winter) with :45 retries; see `scripts/crontab.txt`. Logs: `logs/cron.log`.
+
+```bash
+crontab -l > /tmp/crontab.bak && (cat /tmp/crontab.bak; cat scripts/crontab.txt) | crontab -
+```
+
+Push channels and the API key go in `PointStock/.env` (git-ignored, loaded by the script):
+
+```
+ANTHROPIC_API_KEY=...
+PREMARKET_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/...
+# or PREMARKET_TELEGRAM_BOT_TOKEN / PREMARKET_TELEGRAM_CHAT_ID
+# or PREMARKET_SMTP_HOST / _PORT / _USER / _PASSWORD, PREMARKET_EMAIL_FROM / _TO
+```
+
+The analyst panel makes 7 `claude-opus-5-5` calls per triggered event (only on materiality-3 news or a
+tripwire hit), with server-side refusal fallback enabled. `--no-panel` turns it off. Its weight in
+P(up) is 0 until 20 panel events have been scored.

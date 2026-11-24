@@ -15,3 +15,4 @@ dependencies:
       - yfinance
       - arch
       - anthropic
+      - exchange_calendars

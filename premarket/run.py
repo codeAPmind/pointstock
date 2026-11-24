@@ -28,6 +28,9 @@ from . import combine as C
 from . import ledger as L
 from . import models as M
 from . import news as N
+from . import notify as NT
+from . import panel as P
+from . import schedule as S
 from .refit import refit_ticker
 from .report import TickerCard, run_meta_now, write_reports
 
@@ -35,8 +38,11 @@ log = logging.getLogger("premarket")
 
 
 def next_session(last_bar: pd.Timestamp) -> pd.Timestamp:
-    """Next weekday after the last completed bar (exchange holidays: M5)."""
-    return (last_bar + pd.offsets.BDay(1)).normalize()
+    """Next NYSE session after the last completed bar (weekday fallback)."""
+    try:
+        return pd.Timestamp(S._calendar().next_session(pd.Timestamp(last_bar).normalize())).tz_localize(None)
+    except Exception:
+        return (last_bar + pd.offsets.BDay(1)).normalize()
 
 
 def combine_card(c: TickerCard, disabled: list[str]) -> C.Combined:
@@ -99,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reports-dir", default=None, help="write reports here instead of config paths.reports")
     ap.add_argument("--no-llm", action="store_true", help="score headlines with the keyword lexicon only")
     ap.add_argument("--no-ledger", action="store_true", help="do not write to the forecast ledger (what-if runs)")
+    ap.add_argument("--no-panel", action="store_true", help="skip the tier-2 analyst panel (no Opus calls)")
+    ap.add_argument("--scheduled", action="store_true",
+                    help="unattended mode: skip holidays, run once per session inside the pre-market window, push")
+    ap.add_argument("--force", action="store_true", help="with --scheduled: ignore the time window and run stamp")
+    ap.add_argument("--notify", action="store_true", help="push the summary to configured channels")
     args = ap.parse_args(argv)
     overrides = {k.upper(): float(v) for k, v in (o.split("=", 1) for o in args.premarket)}
 
@@ -112,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     now = datetime.now(timezone.utc)
+    if args.scheduled:
+        go, reason = S.should_run(paths["data"], now, force=args.force)
+        print(f"[scheduled] {reason}")
+        if not go:
+            return 0
     manifest = D.RunManifest()
     years, gcfg = cfg["history_years"], cfg["garch"]
 
@@ -212,6 +228,16 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             log.exception("%s: news failed", t)
             warnings.append(f"news module failed: {exc}")
+        # Tier-2 analyst panel for materiality-3 events (M5); display only, weight 0
+        if card.news is not None and not args.no_panel and cfg.get("panel", {}).get("enabled", True):
+            try:
+                card.panels, pw = P.process_events(
+                    t, tn["company"], card.news, priors, pm.price or float(px["Close"].iloc[-1]),
+                    paths["data"], sessions[t], llm_ok=(not args.no_llm) and N.llm_available())
+                warnings.extend(pw)
+            except Exception as exc:
+                log.exception("%s: panel failed", t)
+                warnings.append(f"analyst panel failed: {exc}")
         if fc and card.event_day:
             card.event_bands = B.widened_bands(last_close, fc.band68, fc.band95, gr)
         thin = [r.label for r in conds if not r.usable]
@@ -285,11 +311,18 @@ def main(argv: list[str] | None = None) -> int:
                     "event_bands": c.event_bands,
                     "direction": c.direction.to_dict() if c.direction else None,
                     "news": c.news.to_dict() if c.news else None,
-                    "combined": c.combined.to_dict() if c.combined else None} for c in cards},
+                    "combined": c.combined.to_dict() if c.combined else None,
+                    "panels": [{"event_id": o.record.event_id, "ran_today": o.ran_today, "note": o.note}
+                               for o in c.panels]} for c in cards},
         indent=2, default=str))
 
     html_path, md_path = write_reports(cards, meta, args.reports_dir or paths["reports"])
     print(f"report: {html_path}\nsummary: {md_path}\nmanifest: {run_dir / 'run_manifest.json'}")
+    if args.notify or args.scheduled:
+        res = NT.push(cards, meta, html_path)
+        print("push: " + (", ".join(f"{k} {v}" for k, v in res.items()) or "no channel configured"))
+    if args.scheduled:
+        S.mark_done(paths["data"], session, f"{len(cards)} tickers")
     return 0
 
 

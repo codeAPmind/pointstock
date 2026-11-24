@@ -39,6 +39,7 @@ class TickerCard:
     direction: DirectionForecast | None = None
     news: NewsResult | None = None
     combined: Combined | None = None
+    panels: list = field(default_factory=list)      # panel.PanelOutcome
 
     @property
     def gap(self) -> float | None:
@@ -97,6 +98,7 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
     out["MODELS"] = model_lines(c)
     out["BASE RATES"] = base_rate_lines(c)
     out["NEWS"] = news_lines(c)
+    out["EVENTS"] = event_lines(c)
     out["WARNINGS"] = c.warnings or ["none"]
     return out
 
@@ -135,6 +137,31 @@ def news_lines(c: TickerCard) -> list[str]:
     top = sorted(nr.headlines, key=lambda h: (-h.materiality, -abs(h.sentiment)))[:5]
     for h in top:
         lines.append(f"{h.sentiment:+.1f} m{h.materiality}  {h.title}  ({h.source}, {_age(h.published_utc)})")
+    return lines
+
+
+def event_lines(c: TickerCard) -> list[str]:
+    if not c.panels:
+        return ["no materiality-3 event live (analyst panel not triggered)"]
+    lines = []
+    for o in c.panels:
+        r = o.record.latest
+        if r is None:
+            lines.append(f"{o.record.event_type}: {o.note}")
+            continue
+        status = "panel ran today" if o.ran_today else o.note
+        lines.append(f"{o.record.event_type} (first seen {o.record.first_seen}) → {status} [{r.trigger}]")
+        lab = {s["id"]: s for s in r.scenarios}
+        lines.append("Scenarios: " + " · ".join(
+            f"{lab[i]['label']} ({lab[i]['timeframe']}) {p:.0%}" for i, p in
+            sorted(r.aggregate.items(), key=lambda kv: -kv[1])))
+        ev = (f"expected value ${r.expected_price:,.2f} vs ${r.reference_price:,.2f}"
+              if r.expected_price and r.reference_price else "expected value n/a")
+        lines.append(f"Persona spread: {r.disagreement_label} ({r.disagreement:.2f}) · {ev} · "
+                     + ("shrunk to curated prior" if r.shrunk_to_prior else "no curated prior, not shrunk")
+                     + f" · weight in P(up) 0 until 20 scored events")
+        if r.tripwires:
+            lines.append("Tripwires: " + "; ".join(t["signal"] for t in r.tripwires))
     return lines
 
 
@@ -201,7 +228,7 @@ def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "WARNINGS"):
+        for name in ("VOLATILITY", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "EVENTS", "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -328,6 +355,41 @@ def _news_html(c: TickerCard) -> str:
     return "".join(parts)
 
 
+def _events_html(c: TickerCard) -> str:
+    e = html.escape
+    parts = ['<div class="row"><div class="lbl">EVENTS</div><div>']
+    if not c.panels:
+        parts.append('<div class="small">No materiality-3 event live; analyst panel not triggered.</div></div></div>')
+        return "".join(parts)
+    for o in c.panels:
+        r = o.record.latest
+        if r is None:
+            parts.append(f'<div class="small">{e(o.record.event_type)}: {e(o.note)}</div>')
+            continue
+        status = "panel ran today" if o.ran_today else o.note
+        parts.append(f'<div><b>{e(o.record.event_type)}</b> <span class="small">first seen {e(o.record.first_seen)} '
+                     f'· {e(status)} · trigger: {e(r.trigger)}</span></div>')
+        lab = {s["id"]: s for s in r.scenarios}
+        parts.append('<div class="tblwrap"><table class="br"><tr><th>Scenario</th><th>Time frame</th>'
+                     '<th>Panel</th><th>Price if</th>' + "".join(f"<th>{e(p)}</th>" for p in r.personas) + '</tr>')
+        for i, p in sorted(r.aggregate.items(), key=lambda kv: -kv[1]):
+            s = lab[i]
+            price = f"${s['price']:,.2f}" if s.get("price") else "—"
+            parts.append(f'<tr><td>{e(s["label"])}</td><td>{e(s["timeframe"])}</td><td><b>{p:.0%}</b></td>'
+                         f'<td>{price}</td>' + "".join(f"<td>{v['probs'][i]:.0%}</td>" for v in r.personas.values())
+                         + '</tr>')
+        parts.append('</table></div>')
+        ev = (f"expected value <b>${r.expected_price:,.2f}</b> vs ${r.reference_price:,.2f}"
+              if r.expected_price and r.reference_price else "expected value n/a")
+        parts.append(f'<div class="small">Persona spread <b>{e(r.disagreement_label)}</b> ({r.disagreement:.2f}) · {ev} · '
+                     + ("shrunk toward the curated prior" if r.shrunk_to_prior else "no curated prior, not shrunk")
+                     + f' · {r.dropped_claims} uncited claims dropped · weight in P(up) 0 until 20 scored events</div>')
+        if r.tripwires:
+            parts.append('<div class="small">Tripwires: ' + "; ".join(e(t["signal"]) for t in r.tripwires) + '</div>')
+    parts.append('</div></div>')
+    return "".join(parts)
+
+
 def _models_html(c: TickerCard) -> str:
     d = c.direction
     parts = ['<div class="row"><div class="lbl">MODELS</div><div>']
@@ -435,6 +497,7 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
         body.append(_models_html(c))
         body.append(_base_rates_html(c))
         body.append(_news_html(c))
+        body.append(_events_html(c))
         warn = "; ".join(e(w) for w in c.warnings) if c.warnings else "none"
         body.append(f'<div class="row"><div class="lbl">WARNINGS</div><div class="{"warn" if c.warnings else "small"}">{warn}</div></div>')
         body.append('</section>')

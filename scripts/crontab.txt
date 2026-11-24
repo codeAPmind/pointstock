@@ -1,0 +1,7 @@
+# PointStock pre-market report (machine clock = Asia/Singapore, no DST).
+# 08:30 ET = 21:30 SGT in winter (EST) and 20:30 SGT in summer (EDT); the run
+# itself checks the NYSE calendar and the ET window, and runs once per session.
+# :45 is a retry if the :30 attempt failed (a no-op once the session is done).
+30,45 20,21 * * 1-5 /bin/bash /Users/openclaw/openclaw_workspace/PointStock/scripts/run_premarket.sh
+# Weekly model refit: Sunday 20:00 SGT = Sunday morning ET.
+0 20 * * 0 /bin/bash /Users/openclaw/openclaw_workspace/PointStock/scripts/weekly_refit.sh
