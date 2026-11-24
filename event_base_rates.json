@@ -4,37 +4,91 @@
   "events": {
     "ceo_departure": {
       "question": "Does the stock recover the event-day drop within 30 trading days?",
-      "keywords": ["ceo resigns", "ceo resignation", "ceo steps down", "ceo departure", "ceo to step down", "ousted as ceo", "ceo exits"],
-      "prior": null,
-      "curated": false,
-      "cases": [],
-      "candidate_cases": [{"ticker": "NVDA", "date": "2026-11-12", "what": "Huang resignation"}]
-    },
-    "ceo_return": {
-      "question": "Does the return rally hold after 20 trading days?",
-      "keywords": ["returns as ceo", "reinstated as ceo", "reinstates", "rejoins as ceo", "back as ceo"],
+      "keywords": [
+        "ceo resigns",
+        "ceo resignation",
+        "ceo steps down",
+        "ceo departure",
+        "ceo to step down",
+        "ousted as ceo",
+        "ceo exits"
+      ],
       "prior": null,
       "curated": false,
       "cases": [],
       "candidate_cases": [
-        {"ticker": "private:OpenAI", "date": "2023-11-21", "what": "Altman return"},
-        {"ticker": "NVDA", "date": "2026-11-23", "what": "Huang return"}
+        {
+          "ticker": "NVDA",
+          "date": "2026-11-12",
+          "what": "Huang resignation"
+        }
+      ]
+    },
+    "ceo_return": {
+      "question": "Does the return rally hold after 20 trading days?",
+      "keywords": [
+        "returns as ceo",
+        "reinstated as ceo",
+        "reinstates",
+        "rejoins as ceo",
+        "back as ceo",
+        "reinstatement",
+        "reinstated"
+      ],
+      "prior": null,
+      "curated": false,
+      "cases": [],
+      "candidate_cases": [
+        {
+          "ticker": "private:OpenAI",
+          "date": "2023-11-21",
+          "what": "Altman return"
+        },
+        {
+          "ticker": "NVDA",
+          "date": "2026-11-23",
+          "what": "Huang return"
+        }
       ]
     },
     "merger_talks": {
       "question": "Do talks reach a signed agreement within 6 months?",
-      "keywords": ["merger talks", "in talks to acquire", "acquisition talks", "takeover bid", "exploring a sale", "merger agreement"],
+      "keywords": [
+        "merger talks",
+        "in talks to acquire",
+        "acquisition talks",
+        "takeover bid",
+        "exploring a sale",
+        "merger agreement"
+      ],
       "prior": null,
       "curated": false,
       "cases": [],
       "candidate_cases": [
-        {"ticker": "private:SpaceX/xAI", "date": "2026", "what": "SpaceX/xAI talks"},
-        {"ticker": "TSLA", "date": "2016-06-21", "what": "Tesla/SolarCity offer"}
+        {
+          "ticker": "private:SpaceX/xAI",
+          "date": "2026",
+          "what": "SpaceX/xAI talks"
+        },
+        {
+          "ticker": "TSLA",
+          "date": "2016-06-21",
+          "what": "Tesla/SolarCity offer"
+        }
       ]
     },
     "regulatory_legal": {
       "question": "Does a probe lead to a material penalty within 12 months?",
-      "keywords": ["sec probe", "investigation", "subpoena", "doj", "ftc", "antitrust", "lawsuit", "recall"],
+      "keywords": [
+        "sec probe",
+        "investigation",
+        "subpoena",
+        "doj",
+        "ftc",
+        "antitrust",
+        "lawsuit",
+        "recall"
+      ],
       "prior": null,
       "curated": false,
       "cases": [],
@@ -42,7 +96,15 @@
     },
     "earnings": {
       "question": "Computed from the stock's own past earnings-day moves (planned).",
-      "keywords": ["earnings", "quarterly results", "q1 results", "q2 results", "q3 results", "q4 results", "guidance"],
+      "keywords": [
+        "earnings",
+        "quarterly results",
+        "q1 results",
+        "q2 results",
+        "q3 results",
+        "q4 results",
+        "guidance"
+      ],
       "prior": null,
       "curated": false,
       "cases": [],
@@ -50,7 +112,14 @@
     },
     "analyst_action": {
       "question": "Does an upgrade/downgrade drift continue the next day?",
-      "keywords": ["upgrade", "upgrades", "downgrade", "downgrades", "price target", "initiates coverage"],
+      "keywords": [
+        "upgrade",
+        "upgrades",
+        "downgrade",
+        "downgrades",
+        "price target",
+        "initiates coverage"
+      ],
       "prior": null,
       "curated": false,
       "cases": [],

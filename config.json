@@ -29,5 +29,29 @@
     "market": "America/New_York",
     "local": "Asia/Singapore"
   },
-  "event_priors": "event_base_rates.json"
+  "event_priors": "event_base_rates.json",
+  "news": {
+    "hours": 36,
+    "TSLA": {
+      "company": "Tesla",
+      "names": [
+        "Tesla"
+      ],
+      "query": "Tesla stock"
+    },
+    "NVDA": {
+      "company": "Nvidia",
+      "names": [
+        "Nvidia"
+      ],
+      "query": "Nvidia stock"
+    },
+    "OPEN": {
+      "company": "Opendoor",
+      "names": [
+        "Opendoor"
+      ],
+      "query": "Opendoor"
+    }
+  }
 }

@@ -146,6 +146,7 @@ class GapRate:
     mean_open_to_close: float
     median_open_to_close: float
     usable: bool
+    p_up_vs_prev: float = float("nan")   # P(close > prior close): the gap-day prior p0
     # Gap-conditioned band for today's close, in sigma-scaled returns (see below).
     band68: tuple[float, float] | None = None
     band95: tuple[float, float] | None = None
@@ -183,7 +184,8 @@ def gap_rates(px: pd.DataFrame, gap: float, sigma_today: float | None = None) ->
                    p_gap_fills=float(m["fills"].mean()) if n else float("nan"),
                    mean_open_to_close=float(m["oc"].mean()) if n else float("nan"),
                    median_open_to_close=float(m["oc"].median()) if n else float("nan"),
-                   usable=n >= MIN_CASES)
+                   usable=n >= MIN_CASES,
+                   p_up_vs_prev=float((m["close_vs_prev"] > 0).mean()) if n else float("nan"))
     if rate.usable and sigma_today:
         z = (m["close_vs_prev"] / m["sigma_prev"]).to_numpy()
         q = np.quantile(z, [0.025, 0.16, 0.84, 0.975]) * sigma_today

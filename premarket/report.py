@@ -16,7 +16,9 @@ from zoneinfo import ZoneInfo
 
 from .baserates import MIN_CASES, ConditionalRate, GapRate
 from .garch import Coverage, GarchForecast
+from .combine import Combined
 from .models import DirectionForecast
+from .news import NewsResult
 
 
 @dataclass
@@ -35,6 +37,8 @@ class TickerCard:
     event_bands: tuple[tuple[float, float], tuple[float, float]] | None = None
     premarket_source: str = "yfinance"
     direction: DirectionForecast | None = None
+    news: NewsResult | None = None
+    combined: Combined | None = None
 
     @property
     def gap(self) -> float | None:
@@ -89,10 +93,49 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
                 out["VOLATILITY"].append(
                     f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma ({f.sigma_next:.2f}%); "
                     f"too few similar gaps to widen the band")
+    out["DIRECTION"] = direction_lines(c)
     out["MODELS"] = model_lines(c)
     out["BASE RATES"] = base_rate_lines(c)
+    out["NEWS"] = news_lines(c)
     out["WARNINGS"] = c.warnings or ["none"]
     return out
+
+
+def _age(iso: str) -> str:
+    h = (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds() / 3600
+    return f"{h:.0f}h ago" if h >= 1 else f"{h * 60:.0f}m ago"
+
+
+def direction_lines(c: TickerCard) -> list[str]:
+    cb = c.combined
+    if cb is None:
+        return ["not available"]
+    up, down, n = cb.agreement
+    lines = [f"P(up) {cb.p_final:.0%}   (prior {cb.p0:.1%} from {cb.p0_source} → final {cb.p_final:.1%}"
+             + (f", capped from {cb.p_raw:.1%}" if cb.capped else "") + ")"]
+    for sg in cb.signals:
+        lines.append(f"{sg.label} {sg.p:.0%} ({sg.detail}; weight {sg.weight:.2f}, moves logit {sg.contribution:+.3f})")
+    lines.append(f"agreement: {up} up / {down} down of {n} weighted signals")
+    return lines
+
+
+def news_lines(c: TickerCard) -> list[str]:
+    nr = c.news
+    if nr is None:
+        return ["not available"]
+    if not nr.headlines:
+        return [f"no relevant headlines ({nr.n_raw} fetched, 0 relevant)"]
+    head = (f"score {nr.score:+.2f}" if nr.score is not None else "score n/a") + \
+        f" · {nr.n_relevant} relevant of {nr.n_raw} fetched · scored by {nr.scorer}"
+    if nr.count_z is not None:
+        head += f" · headline count z {nr.count_z:+.1f}"
+    lines = [head]
+    for et, titles in nr.events.items():
+        lines.append(f"EVENT {et} ({len(titles)} headlines) · prior: uncurated placeholder, not used")
+    top = sorted(nr.headlines, key=lambda h: (-h.materiality, -abs(h.sentiment)))[:5]
+    for h in top:
+        lines.append(f"{h.sentiment:+.1f} m{h.materiality}  {h.title}  ({h.source}, {_age(h.published_utc)})")
+    return lines
 
 
 def model_lines(c: TickerCard) -> list[str]:
@@ -149,14 +192,16 @@ def base_rate_lines(c: TickerCard) -> list[str]:
 def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
     lines = [f"# Pre-market report — {run_meta['session']}",
              f"Generated {run_meta['generated_ny']} / {run_meta['generated_local']} · "
-             f"forecast for the {run_meta['session']} session · M3 (range, base rates, ML panel)", ""]
+             f"forecast for the {run_meta['session']} session · M4", ""]
     if run_meta.get("global_warnings"):
         lines += [f"> **Data warning:** {w}" for w in run_meta["global_warnings"]] + [""]
+    if run_meta.get("ledger_summary"):
+        lines += [f"_{run_meta['ledger_summary']}_", ""]
     for c in cards:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "MODELS", "BASE RATES", "WARNINGS"):
+        for name in ("VOLATILITY", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -230,6 +275,59 @@ def _pct(x: float, d: int = 0, sign: bool = False) -> str:
     return f"{x:+.{d}%}" if sign else f"{x:.{d}%}"
 
 
+def _direction_html(c: TickerCard) -> str:
+    cb = c.combined
+    if cb is None:
+        return ""
+    e = html.escape
+    up, down, n = cb.agreement
+    parts = ['<div class="row"><div class="lbl">DIRECTION</div><div>',
+             f'<div class="kv"><span>P(up) <b style="font-size:20px">{cb.p_final:.0%}</b></span>'
+             f'<span class="small">prior {cb.p0:.1%} ({e(cb.p0_source)}) → final {cb.p_final:.1%}'
+             + (f', capped from {cb.p_raw:.1%}' if cb.capped else '') + '</span></div>']
+    if cb.signals:
+        parts.append('<div class="tblwrap"><table class="br"><tr><th>Signal</th><th>P(up)</th><th>Weight</th>'
+                     '<th>Logit shift</th><th>Support</th></tr>')
+        for sg in cb.signals:
+            cls = "" if sg.weight > 0 else "ctx"
+            parts.append(f'<tr class="{cls}"><td>{e(sg.label)}</td><td>{sg.p:.1%}</td><td>{sg.weight:.2f}</td>'
+                         f'<td>{sg.contribution:+.3f}</td><td>{e(sg.detail)}</td></tr>')
+        parts.append('</table></div>')
+    parts.append(f'<div class="small">Agreement: {up} up / {down} down of {n} weighted signals. '
+                 f'Capped to 35–65% (to p0 ± 15 points when a gap prior sits outside that range); '
+                 f'agreement among small weights is still a weak signal.</div></div></div>')
+    return "".join(parts)
+
+
+def _news_html(c: TickerCard) -> str:
+    nr = c.news
+    e = html.escape
+    parts = ['<div class="row"><div class="lbl">NEWS</div><div>']
+    if nr is None:
+        parts.append('<div class="small">News module not available.</div></div></div>')
+        return "".join(parts)
+    meta = (f'score <b>{nr.score:+.2f}</b>' if nr.score is not None else 'score n/a') + \
+        f' <span class="small">· {nr.n_relevant} relevant of {nr.n_raw} fetched (last 36h) · scored by {e(nr.scorer)}'
+    if nr.count_z is not None:
+        meta += f' · headline count z {nr.count_z:+.1f}'
+    parts.append(f'<div>{meta}</span></div>')
+    for et, titles in nr.events.items():
+        parts.append(f'<div class="event">Event: {e(et)} ({len(titles)} headlines) '
+                     f'<span class="small">· prior is an uncurated placeholder, not used in P(up)</span></div>')
+    top = sorted(nr.headlines, key=lambda h: (-h.materiality, -abs(h.sentiment)))[:5]
+    if top:
+        parts.append('<div class="tblwrap"><table class="br"><tr><th>Headline</th><th>Tone</th><th>Mat.</th><th>Source</th></tr>')
+        for h in top:
+            title = f'<a href="{e(h.url)}" style="color:inherit">{e(h.title)}</a>' if h.url else e(h.title)
+            parts.append(f'<tr><td style="text-align:left">{title}</td><td>{h.sentiment:+.1f}</td>'
+                         f'<td>{h.materiality}</td><td>{e(h.source)}, {_age(h.published_utc)}</td></tr>')
+        parts.append('</table></div>')
+    else:
+        parts.append('<div class="small">No relevant headlines.</div>')
+    parts.append('</div></div>')
+    return "".join(parts)
+
+
 def _models_html(c: TickerCard) -> str:
     d = c.direction
     parts = ['<div class="row"><div class="lbl">MODELS</div><div>']
@@ -297,7 +395,9 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
     e = html.escape
     body = [f"<h1>Pre-market report — {e(run_meta['session'])}</h1>",
             f'<div class="meta">Generated {e(run_meta["generated_ny"])} / {e(run_meta["generated_local"])} · '
-            f'forecast for the {e(run_meta["session"])} session · milestone M3 (range, base rates, ML panel)</div>']
+            f'forecast for the {e(run_meta["session"])} session · milestone M4</div>']
+    if run_meta.get("ledger_summary"):
+        body.append(f'<div class="meta">{e(run_meta["ledger_summary"])}</div>')
     for w in run_meta.get("global_warnings", []):
         body.append(f'<div class="gw">Data warning: {e(w)}</div>')
     for c in cards:
@@ -331,10 +431,10 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
                 else:
                     body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma; too few similar gaps to widen the band.</div>')
             body.append('</div></div>')
+        body.append(_direction_html(c))
         body.append(_models_html(c))
         body.append(_base_rates_html(c))
-        body.append('<div class="row"><div class="lbl">NEWS</div>'
-                    '<div class="small">Not built yet (news + combiner + ledger in M4). No final P(up) until then.</div></div>')
+        body.append(_news_html(c))
         warn = "; ".join(e(w) for w in c.warnings) if c.warnings else "none"
         body.append(f'<div class="row"><div class="lbl">WARNINGS</div><div class="{"warn" if c.warnings else "small"}">{warn}</div></div>')
         body.append('</section>')
