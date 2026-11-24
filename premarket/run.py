@@ -23,6 +23,8 @@ from . import baserates as B
 from . import data as D
 from . import features as F
 from . import garch as G
+from . import models as M
+from .refit import refit_ticker
 from .report import TickerCard, run_meta_now, write_reports
 
 log = logging.getLogger("premarket")
@@ -114,6 +116,21 @@ def main(argv: list[str] | None = None) -> int:
                           premarket=pm.price, premarket_asof=pm.asof_utc, warnings=warnings,
                           prior=B.unconditional_rate(px), conditions=conds, gap_rate=gr,
                           premarket_source=pm.source)
+        # Direction models (M3): saved weekly bundle, refit inline if missing/outdated
+        try:
+            bundle = M.load_bundle(paths["data"], t)
+            if bundle is None:
+                log.info("%s: no saved models, running walk-forward refit now", t)
+                bundle = refit_ticker(t, cfg, args.offline, market)
+            card.direction = M.predict_today(bundle, table)
+            warnings.extend(card.direction.warnings)
+            if card.direction.p_ml is None:
+                warnings.append("no direction edge: every model's walk-forward BSS ≤ 0")
+            elif card.direction.best.bss < 0.01:
+                warnings.append(f"direction edge is weak (best BSS {card.direction.best.bss:+.4f} < 0.01)")
+        except Exception as exc:
+            log.exception("%s: direction models failed", t)
+            warnings.append(f"direction models failed: {exc}")
         if fc and card.event_day:
             card.event_bands = B.widened_bands(last_close, fc.band68, fc.band95, gr)
         thin = [r.label for r in conds if not r.usable]
@@ -130,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"{cov.inside68:.1%} over {cov.n_days}d (95%: {cov.inside95:.1%})")
         print(f"[{t}] prior P(up) {card.prior[0]:.1%} (N={card.prior[1]}) | active conditions: "
               + (", ".join(f"{r.key} N={r.n} up {r.p_up_1d:.0%}" for r in conds) or "none"))
+        if card.direction:
+            d = card.direction
+            print(f"[{t}] ML " + (f"P(up) {d.p_ml:.1%}" if d.p_ml is not None else "no edge")
+                  + f" | best {d.best.model} BSS {d.best.bss:+.4f} | walk-forward {d.test_start}→{d.test_end}")
+            print("\n".join("      " + l for l in M.format_table(d).splitlines()))
         if gr is not None:
             print(f"[{t}] gap {gr.gap:+.2%}: N={gr.n} close>open {gr.p_close_above_open:.0%} "
                   f"fills {gr.p_gap_fills:.0%} mean o->c {gr.mean_open_to_close:+.2%}")
@@ -160,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
                     "premarket": c.premarket, "prior": c.prior,
                     "conditions": [B.to_dict(r) for r in c.conditions],
                     "gap": B.to_dict(c.gap_rate) if c.gap_rate else None,
-                    "event_bands": c.event_bands} for c in cards}, indent=2, default=str))
+                    "event_bands": c.event_bands,
+                    "direction": c.direction.to_dict() if c.direction else None} for c in cards}, indent=2, default=str))
 
     html_path, md_path = write_reports(cards, meta, args.reports_dir or paths["reports"])
     print(f"report: {html_path}\nsummary: {md_path}\nmanifest: {run_dir / 'run_manifest.json'}")

@@ -9,6 +9,8 @@ dependencies:
   - scipy
   - pyarrow
   - pytest
+  - scikit-learn
+  - joblib
   - pip:
       - yfinance
       - arch

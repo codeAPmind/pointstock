@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .baserates import MIN_CASES, ConditionalRate, GapRate
 from .garch import Coverage, GarchForecast
+from .models import DirectionForecast
 
 
 @dataclass
@@ -33,6 +34,7 @@ class TickerCard:
     gap_rate: GapRate | None = None
     event_bands: tuple[tuple[float, float], tuple[float, float]] | None = None
     premarket_source: str = "yfinance"
+    direction: DirectionForecast | None = None
 
     @property
     def gap(self) -> float | None:
@@ -87,9 +89,29 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
                 out["VOLATILITY"].append(
                     f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma ({f.sigma_next:.2f}%); "
                     f"too few similar gaps to widen the band")
+    out["MODELS"] = model_lines(c)
     out["BASE RATES"] = base_rate_lines(c)
     out["WARNINGS"] = c.warnings or ["none"]
     return out
+
+
+def model_lines(c: TickerCard) -> list[str]:
+    d = c.direction
+    if d is None:
+        return ["not available"]
+    b = d.best
+    if d.p_ml is None:
+        head = (f"no direction edge: every model's BSS ≤ 0 over {b.n_test} test days → "
+                f"use the base rate ({d.up_rate:.1%})")
+    else:
+        head = (f"ML ensemble {d.p_ml:.1%} up (best {b.model}, BSS {b.bss:+.4f}, "
+                f"accuracy {b.accuracy:.1%}; combiner weight arrives in M4)")
+    lines = [head]
+    for k, s in d.scores.items():
+        lines.append(f"{k}: today {d.probs[k]:.1%} · walk-forward accuracy {s.accuracy:.1%} · "
+                     f"Brier {s.brier:.4f} vs {s.brier_base:.4f} · BSS {s.bss:+.4f} · weight {d.weights[k]:.2f}")
+    lines.append(f"walk-forward {d.test_start} → {d.test_end}, retrain every 21 days · models fitted {d.fitted_on}")
+    return lines
 
 
 def _cond_line(r: ConditionalRate) -> str:
@@ -127,14 +149,14 @@ def base_rate_lines(c: TickerCard) -> list[str]:
 def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
     lines = [f"# Pre-market report — {run_meta['session']}",
              f"Generated {run_meta['generated_ny']} / {run_meta['generated_local']} · "
-             f"forecast for the {run_meta['session']} session · M2 (range + base rates)", ""]
+             f"forecast for the {run_meta['session']} session · M3 (range, base rates, ML panel)", ""]
     if run_meta.get("global_warnings"):
         lines += [f"> **Data warning:** {w}" for w in run_meta["global_warnings"]] + [""]
     for c in cards:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "BASE RATES", "WARNINGS"):
+        for name in ("VOLATILITY", "MODELS", "BASE RATES", "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -208,6 +230,32 @@ def _pct(x: float, d: int = 0, sign: bool = False) -> str:
     return f"{x:+.{d}%}" if sign else f"{x:.{d}%}"
 
 
+def _models_html(c: TickerCard) -> str:
+    d = c.direction
+    parts = ['<div class="row"><div class="lbl">MODELS</div><div>']
+    if d is None:
+        parts.append('<div class="small">Direction models not available.</div></div></div>')
+        return "".join(parts)
+    b = d.best
+    if d.p_ml is None:
+        parts.append(f'<div><b>No direction edge.</b> Every model scored BSS ≤ 0 on {b.n_test} unseen days; '
+                     f'the report falls back to the base rate <b>{d.up_rate:.1%}</b>.</div>')
+    else:
+        parts.append(f'<div>ML ensemble <b>{d.p_ml:.1%}</b> up <span class="small">(best {html.escape(b.model)}, '
+                     f'BSS {b.bss:+.4f}; its weight in the final P(up) is set by the combiner in M4)</span></div>')
+    parts.append('<div class="tblwrap"><table class="br"><tr><th>Model</th><th>Today P(up)</th>'
+                 '<th>Accuracy</th><th>Brier</th><th>Baseline</th><th>BSS</th><th>Weight</th></tr>')
+    for k, s in sorted(d.scores.items(), key=lambda kv: -kv[1].bss):
+        cls = "" if d.weights[k] > 0 else "ctx"
+        parts.append(f'<tr class="{cls}"><td>{html.escape(k)}</td><td>{d.probs[k]:.1%}</td>'
+                     f'<td>{s.accuracy:.1%}</td><td>{s.brier:.4f}</td><td>{s.brier_base:.4f}</td>'
+                     f'<td>{s.bss:+.4f}</td><td>{d.weights[k]:.2f}</td></tr>')
+    parts.append(f'</table></div><div class="small">Walk-forward {d.test_start} → {d.test_end} '
+                 f'({b.n_test} unseen days, retrained every 21). Baseline always predicts the training up-rate. '
+                 f'Models fitted {d.fitted_on}.</div></div></div>')
+    return "".join(parts)
+
+
 def _base_rates_html(c: TickerCard) -> str:
     e = html.escape
     parts = ['<div class="row"><div class="lbl">BASE RATES</div><div>']
@@ -249,7 +297,7 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
     e = html.escape
     body = [f"<h1>Pre-market report — {e(run_meta['session'])}</h1>",
             f'<div class="meta">Generated {e(run_meta["generated_ny"])} / {e(run_meta["generated_local"])} · '
-            f'forecast for the {e(run_meta["session"])} session · milestone M2 (range + base rates)</div>']
+            f'forecast for the {e(run_meta["session"])} session · milestone M3 (range, base rates, ML panel)</div>']
     for w in run_meta.get("global_warnings", []):
         body.append(f'<div class="gw">Data warning: {e(w)}</div>')
     for c in cards:
@@ -283,9 +331,10 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
                 else:
                     body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma; too few similar gaps to widen the band.</div>')
             body.append('</div></div>')
+        body.append(_models_html(c))
         body.append(_base_rates_html(c))
-        body.append('<div class="row"><div class="lbl">MODELS · NEWS</div>'
-                    '<div class="small">Not built yet (ML panel M3, news + combiner M4). No final P(up) until then.</div></div>')
+        body.append('<div class="row"><div class="lbl">NEWS</div>'
+                    '<div class="small">Not built yet (news + combiner + ledger in M4). No final P(up) until then.</div></div>')
         warn = "; ".join(e(w) for w in c.warnings) if c.warnings else "none"
         body.append(f'<div class="row"><div class="lbl">WARNINGS</div><div class="{"warn" if c.warnings else "small"}">{warn}</div></div>')
         body.append('</section>')

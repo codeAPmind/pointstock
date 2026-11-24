@@ -129,7 +129,7 @@ def get_prices(ticker: str, data_dir: str | Path, years: int = 6,
             df.to_parquet(path)
             status.detail = "downloaded"
         except Exception as exc:  # network, rate limit, schema change
-            log.warning("price fetch failed for %s: %s", ticker, exc)
+            (log.info if offline else log.warning)("price fetch failed for %s: %s", ticker, exc)
             if not path.exists():
                 status.ok = False
                 status.detail = f"failed, no cache: {exc}"
