@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import llm as LLM
 from .baserates import EventPrior
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,9 @@ def fired_tripwires(rec: EventRecord, headlines: list[dict]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def _call(client, system: str, user: str, schema: dict, max_tokens: int = 16000) -> dict:
+    if client == "deepseek":
+        data, _ = LLM.deepseek_json(system, user, schema, role="panel", max_tokens=8000)
+        return data
     resp = client.beta.messages.create(
         model=PANEL_MODEL,
         max_tokens=max_tokens,
@@ -244,10 +248,15 @@ def expected_price(agg: dict[str, float], scenarios: list[dict]) -> float | None
 
 def run_panel(ticker: str, company: str, event_type: str, evidence: list[str],
               prior: EventPrior | None, reference_price: float | None, today: str,
-              trigger: str = "new", client=None) -> PanelRun:
-    import anthropic
+              trigger: str = "new", client=None, provider: str = "anthropic") -> PanelRun:
+    if client is None and provider == "deepseek":
+        client = "deepseek"
+        model = LLM.deepseek_model("panel")
+    else:
+        import anthropic
 
-    client = client or anthropic.Anthropic()
+        client = client or anthropic.Anthropic()
+        model = PANEL_MODEL
     evidence = evidence[:30]
     n = len(evidence)
     ev = _evidence_block(evidence, prior)
@@ -294,7 +303,7 @@ def run_panel(ticker: str, company: str, event_type: str, evidence: list[str],
     agg, spread = aggregate({k: v["probs"] for k, v in personas.items()}, ids)
     agg, shrunk = shrink_to_prior(agg, [x["id"] for x in scenarios if x.get("yes_for_prior")], prior)
     return PanelRun(
-        date=today, trigger=trigger, model=PANEL_MODEL, prompt_version=PANEL_PROMPT_VERSION,
+        date=today, trigger=trigger, model=model, prompt_version=PANEL_PROMPT_VERSION,
         evidence=evidence, actors=actors, scenarios=scenarios, personas=personas, aggregate=agg,
         disagreement=spread, disagreement_label=disagreement_label(spread), shrunk_to_prior=shrunk,
         expected_price=expected_price(agg, scenarios), reference_price=reference_price,
@@ -310,7 +319,9 @@ class PanelOutcome:
 
 def process_events(ticker: str, company: str, news, priors: dict[str, EventPrior],
                    reference_price: float | None, data_dir: str | Path, today: str,
-                   llm_ok: bool, client=None) -> tuple[list[PanelOutcome], list[str]]:
+                   llm_ok, client=None) -> tuple[list[PanelOutcome], list[str]]:
+    """llm_ok: provider name ("deepseek" / "anthropic"), True (= anthropic) or False/None (skip)."""
+    provider = "anthropic" if llm_ok is True else (llm_ok or None)
     """Run, re-run (tripwire) or show the panel for each live materiality-3 event."""
     warnings: list[str] = []
     outcomes: list[PanelOutcome] = []
@@ -341,8 +352,8 @@ def process_events(ticker: str, company: str, news, priors: dict[str, EventPrior
             outcomes.append(PanelOutcome(rec, False, f"last run {rec.latest.date}; no tripwire fired"
                                          if rec.latest else "not run"))
             continue
-        if not (llm_ok or client):
-            warnings.append(f"materiality-3 event '{et}': analyst panel needs an Anthropic API key")
+        if not (provider or client):
+            warnings.append(f"materiality-3 event '{et}': analyst panel needs an LLM key (DEEPSEEK_API_KEY)")
             if rec.latest:
                 outcomes.append(PanelOutcome(rec, False, f"last run {rec.latest.date}; re-run due ({trigger}) but no API key"))
             continue
@@ -351,7 +362,8 @@ def process_events(ticker: str, company: str, news, priors: dict[str, EventPrior
         if rec.latest:   # a re-run keeps the earlier evidence after today's headlines
             evidence += [t for t in rec.latest.evidence if t not in evidence]
         try:
-            run = run_panel(ticker, company, et, evidence, priors.get(et), reference_price, today, trigger, client)
+            run = run_panel(ticker, company, et, evidence, priors.get(et), reference_price, today, trigger,
+                            client, provider or "anthropic")
             rec.history.append(run)
             save_event(rec, data_dir)
             outcomes.append(PanelOutcome(rec, True, trigger))

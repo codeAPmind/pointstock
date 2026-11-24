@@ -132,7 +132,7 @@ def test_process_events_new_then_cached_then_tripwire(tmp_path):
 def test_no_api_key_skips_panel_with_warning(tmp_path):
     out, w = P.process_events("NVDA", "Nvidia", news(["Board reinstates Huang"]), PRIORS, 158.0,
                               tmp_path, "2026-11-24", llm_ok=False)
-    assert out == [] and any("needs an Anthropic API key" in x for x in w)
+    assert out == [] and any("needs an LLM key" in x for x in w)
 
 
 def test_low_materiality_does_not_trigger(tmp_path):

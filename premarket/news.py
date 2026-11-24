@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import llm as LLM
 from .baserates import EventPrior, detect_events
 
 log = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class ScoredHeadline:
 @dataclass
 class NewsResult:
     ticker: str
-    scorer: str                         # "claude-haiku-5-5" or "lexicon"
+    scorer: str                         # "deepseek:<model>", "claude-haiku-5-5" or "lexicon"
     prompt_version: str
     headlines: list[ScoredHeadline]
     n_raw: int
@@ -197,9 +198,20 @@ def parse_llm_items(text: str, items: list[dict], event_types: list[str]) -> lis
     return out
 
 
+def score_deepseek(items: list[dict], ticker: str, company: str,
+                   event_types: list[str]) -> tuple[list[ScoredHeadline], str]:
+    """One JSON-mode DeepSeek call for all of a ticker's headlines. Returns (scored, model)."""
+    numbered = "\n".join(f"{i}. [{h['source']}] {h['title']}" for i, h in enumerate(items, start=1))
+    data, model = LLM.deepseek_json(
+        SYSTEM_PROMPT.format(company=company, ticker=ticker, event_types=", ".join(event_types)),
+        f"Headlines:\n{numbered}\n\nScore every numbered headline; use its number as i.",
+        _schema(event_types), role="news")
+    return parse_llm_items(json.dumps(data), items, event_types), model
+
+
 def score_llm(items: list[dict], ticker: str, company: str, event_types: list[str],
               client=None) -> list[ScoredHeadline]:
-    """One structured-output call for all of a ticker's headlines."""
+    """One structured-output Claude call for all of a ticker's headlines."""
     import anthropic
 
     client = client or anthropic.Anthropic()
@@ -218,11 +230,7 @@ def score_llm(items: list[dict], ticker: str, company: str, event_types: list[st
 
 
 def llm_available() -> bool:
-    import os
-
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-                or os.environ.get("ANTHROPIC_PROFILE")
-                or (Path.home() / ".config" / "anthropic").exists())
+    return LLM.anthropic_available()
 
 
 # --------------------------------------------------------------------------- #
@@ -263,7 +271,9 @@ def news_probability(score: float | None, p_ref: float) -> float | None:
 
 def analyze(ticker: str, company: str, names: list[str], raw: list[dict], failed_feeds: list[str],
             priors: dict[str, EventPrior], data_dir: str | Path, day: str,
-            use_llm: bool | None = None, client=None) -> NewsResult:
+            use_llm: bool | None = None, client=None, provider: str | None = "auto") -> NewsResult:
+    """provider: "deepseek", "anthropic", "auto" (pick from the environment) or None (lexicon).
+    A `client` (tests) forces the Claude path."""
     warnings = []
     rel = filter_relevant(raw, ticker, names)
     rel = sorted(rel, key=lambda h: h["published_utc"], reverse=True)[:MAX_HEADLINES]
@@ -271,9 +281,22 @@ def analyze(ticker: str, company: str, names: list[str], raw: list[dict], failed
     scorer = "lexicon"
     scored: list[ScoredHeadline] = []
     if rel:
-        if use_llm is None:
-            use_llm = client is not None or llm_available()
-        if use_llm:
+        if client is not None:
+            prov = "anthropic"
+        elif use_llm is False or provider is None:
+            prov = None
+        elif provider in ("deepseek", "anthropic"):
+            prov = provider
+        else:
+            prov = LLM.active_provider(provider or "auto")
+        if prov == "deepseek":
+            try:
+                scored, model = score_deepseek(rel, ticker, company, event_types)
+                scorer = f"deepseek:{model}"
+            except Exception as exc:
+                log.warning("DeepSeek headline scoring failed for %s: %s", ticker, exc)
+                warnings.append(f"DeepSeek headline scoring failed, used keyword lexicon ({exc})"[:200])
+        elif prov == "anthropic":
             try:
                 scored = score_llm(rel, ticker, company, event_types, client)
                 scorer = LLM_MODEL
@@ -281,7 +304,7 @@ def analyze(ticker: str, company: str, names: list[str], raw: list[dict], failed
                 log.warning("LLM headline scoring failed for %s: %s", ticker, exc)
                 warnings.append(f"Claude headline scoring failed, used keyword lexicon ({type(exc).__name__})")
         else:
-            warnings.append("no Anthropic API key: headlines scored by keyword lexicon")
+            warnings.append("no LLM key (DEEPSEEK_API_KEY): headlines scored by keyword lexicon")
         if not scored:
             scored = score_lexicon(rel, priors)
     events: dict[str, list[str]] = {}

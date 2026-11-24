@@ -137,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         log.warning("event_base_rates.json unreadable: %s", exc)
     ncfg = cfg.get("news", {})
+    provider = None if args.no_llm else N.LLM.active_provider(cfg.get("llm", {}).get("provider", "auto"))
+    print(f"LLM provider: {provider or 'none (keyword lexicon, no analyst panel)'}")
     prices: dict[str, pd.DataFrame] = {}
     sessions: dict[str, str] = {}
 
@@ -221,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             raw, failed = D.get_news(t, tn["query"], paths["data"], manifest, args.offline, now,
                                      ncfg.get("hours", 36))
             card.news = N.analyze(t, tn["company"], tn["names"], raw, failed, priors, paths["data"],
-                                  sessions[t], use_llm=False if args.no_llm else None)
+                                  sessions[t], provider=provider)
             warnings.extend(card.news.warnings)
             if card.news.n_relevant == 0:
                 warnings.append("no relevant headlines in the last 36 hours")
@@ -233,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 card.panels, pw = P.process_events(
                     t, tn["company"], card.news, priors, pm.price or float(px["Close"].iloc[-1]),
-                    paths["data"], sessions[t], llm_ok=(not args.no_llm) and N.llm_available())
+                    paths["data"], sessions[t], llm_ok=provider)
                 warnings.extend(pw)
             except Exception as exc:
                 log.exception("%s: panel failed", t)

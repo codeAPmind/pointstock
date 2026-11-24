@@ -5,8 +5,8 @@ Design: [DESIGN.md](DESIGN.md).
 - **M1:** data + features + GJR-GARCH(1,1)-t price bands + HTML/Markdown report.
 - **M2:** conditional base rates (with N), gap base rates on |gap| ≥ 1%, event-day band widening, curated event priors in `event_base_rates.json` (placeholders until you fill them).
 - **M3:** four direction models (logistic regression, random forest, RBF SVM, naive Bayes) scored by walk-forward validation (21-day windows over the last ~750 days) with Brier skill vs a training-up-rate baseline; ensemble weights ∝ max(0, BSS), else "no direction edge".
-- **M4:** news tier 1 (Yahoo + Google News, last 36h, relevance filter, Claude Haiku scoring with a keyword-lexicon fallback), Bayesian log-odds combiner → final P(up) with breakdown and agreement, forecast ledger (`data/forecast_ledger.csv`) with next-morning outcome filling and 60-day Brier skill scoring.
-- **M5:** tier-2 analyst panel for materiality-3 events (actor map, scenario tree, five independent personas on `claude-opus-5-5`, log-odds aggregate, disagreement score, expected value, tripwires that re-run it; history in `data/events/`), NYSE-calendar scheduling with cron, and push to Feishu / Telegram / email.
+- **M4:** news tier 1 (Yahoo + Google News, last 36h, relevance filter, LLM scoring (DeepSeek by default, Claude optional) with a keyword-lexicon fallback), Bayesian log-odds combiner → final P(up) with breakdown and agreement, forecast ledger (`data/forecast_ledger.csv`) with next-morning outcome filling and 60-day Brier skill scoring.
+- **M5:** tier-2 analyst panel for materiality-3 events (actor map, scenario tree, five independent personas (DeepSeek by default), log-odds aggregate, disagreement score, expected value, tripwires that re-run it; history in `data/events/`), NYSE-calendar scheduling with cron, and push to Feishu / Telegram / email.
 
 ## Setup (conda)
 
@@ -29,11 +29,13 @@ python -m pytest                   # look-ahead, GARCH recovery, base-rate and w
 
 Tickers and settings live in `config.json`. Data cache: `data/prices/`, models: `data/models/`, run manifests: `data/runs/<session>/`. The morning run only loads saved models; if none exist it runs the refit first (~10 s per ticker).
 
-## Claude headline scoring
+## LLM provider (headline scoring and analyst panel)
 
-Set `ANTHROPIC_API_KEY` (or run `ant auth login`) and the morning run scores headlines with
-`claude-haiku-5-5` (one structured-output call per ticker). Without credentials it falls back to a
-keyword lexicon and the report says so. `--no-llm` forces the lexicon.
+`config.json` → `"llm": {"provider": "deepseek"}` (or `"anthropic"`, or `"auto"`). DeepSeek settings
+live in `.env`: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` (optional
+`DEEPSEEK_PANEL_MODEL` for the panel). Calls use DeepSeek's JSON mode with the schema in the prompt;
+every reply is validated and clipped. Without a key, or if a call fails, headlines fall back to the
+keyword lexicon and the panel is skipped, and the report says so. `--no-llm` forces the lexicon.
 
 ## Combiner cap
 
@@ -55,12 +57,11 @@ crontab -l > /tmp/crontab.bak && (cat /tmp/crontab.bak; cat scripts/crontab.txt)
 Push channels and the API key go in `PointStock/.env` (git-ignored, loaded by the script):
 
 ```
-ANTHROPIC_API_KEY=...
+DEEPSEEK_API_KEY=...
 PREMARKET_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/...
 # or PREMARKET_TELEGRAM_BOT_TOKEN / PREMARKET_TELEGRAM_CHAT_ID
 # or PREMARKET_SMTP_HOST / _PORT / _USER / _PASSWORD, PREMARKET_EMAIL_FROM / _TO
 ```
 
-The analyst panel makes 7 `claude-opus-5-5` calls per triggered event (only on materiality-3 news or a
-tripwire hit), with server-side refusal fallback enabled. `--no-panel` turns it off. Its weight in
+The analyst panel makes 7 LLM calls per triggered event (only on materiality-3 news or a tripwire hit). `--no-panel` turns it off. Its weight in
 P(up) is 0 until 20 panel events have been scored.
