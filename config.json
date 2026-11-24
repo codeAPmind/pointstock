@@ -1,12 +1,18 @@
 {
-  "tickers": ["TSLA", "NVDA", "OPEN"],
+  "tickers": [
+    "TSLA",
+    "NVDA",
+    "OPEN"
+  ],
   "market_context": {
     "SPY": "SPY",
     "QQQ": "QQQ",
     "VIX": "^VIX",
     "SOXX": "SOXX"
   },
-  "sector_for": {"NVDA": "SOXX"},
+  "sector_for": {
+    "NVDA": "SOXX"
+  },
   "history_years": 6,
   "paths": {
     "data": "data",
@@ -22,5 +28,6 @@
   "timezones": {
     "market": "America/New_York",
     "local": "Asia/Singapore"
-  }
+  },
+  "event_priors": "event_base_rates.json"
 }

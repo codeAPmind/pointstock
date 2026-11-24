@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .baserates import MIN_CASES, ConditionalRate, GapRate
 from .garch import Coverage, GarchForecast
 
 
@@ -27,6 +28,11 @@ class TickerCard:
     premarket: float | None
     premarket_asof: str | None
     warnings: list[str] = field(default_factory=list)
+    prior: tuple[float, int] | None = None              # unconditional P(up), N
+    conditions: list[ConditionalRate] = field(default_factory=list)
+    gap_rate: GapRate | None = None
+    event_bands: tuple[tuple[float, float], tuple[float, float]] | None = None
+    premarket_source: str = "yfinance"
 
     @property
     def gap(self) -> float | None:
@@ -72,24 +78,63 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
             f"model: GJR-GARCH(1,1)-t via {f.engine}, {f.n_obs} days · α {p.alpha:.3f} γ {p.gamma:.3f} "
             f"β {p.beta:.3f} ν {p.nu:.1f} · persistence {p.persistence:.3f}")
         if c.event_day:
-            out["VOLATILITY"].append(
-                f"EVENT DAY: pre-market gap {c.gap:+.1%} already exceeds 1 sigma "
-                f"({f.sigma_next:.2f}%). Band widening from gap base rates arrives in M2.")
+            if c.event_bands:
+                (a68, b68), (a95, b95) = c.event_bands
+                out["VOLATILITY"].append(
+                    f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma → widened with gap base rates: "
+                    f"68% ${a68:,.2f}–${b68:,.2f} · 95% ${a95:,.2f}–${b95:,.2f}")
+            else:
+                out["VOLATILITY"].append(
+                    f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma ({f.sigma_next:.2f}%); "
+                    f"too few similar gaps to widen the band")
+    out["BASE RATES"] = base_rate_lines(c)
     out["WARNINGS"] = c.warnings or ["none"]
     return out
+
+
+def _cond_line(r: ConditionalRate) -> str:
+    tag = "" if r.usable else f"  [context only, N < {MIN_CASES}]"
+    if r.n == 0:
+        return f"{r.label}: no past cases{tag}"
+    return (f"{r.label}: {r.p_up_1d:.0%} up next day, N = {r.n} · mean {r.mean_ret_1d:+.2%} "
+            f"median {r.median_ret_1d:+.2%} · 5-day up {r.p_up_5d:.0%} (N = {r.n_5d}){tag}")
+
+
+def _gap_line(g: GapRate) -> str:
+    tag = "" if g.usable else f"  [context only, N < {MIN_CASES}]"
+    if g.n == 0:
+        return f"Gap {g.gap:+.1%} (past gaps {g.lo:+.1%} to {g.hi:+.1%}): no past cases{tag}"
+    return (f"Gap {g.lo:+.1%} to {g.hi:+.1%}: closes above open {g.p_close_above_open:.0%}, "
+            f"gap fills {g.p_gap_fills:.0%}, mean open→close {g.mean_open_to_close:+.2%}, N = {g.n}{tag}")
+
+
+def base_rate_lines(c: TickerCard) -> list[str]:
+    lines = []
+    if c.prior:
+        lines.append(f"Prior: {c.prior[0]:.1%} of past days closed higher, N = {c.prior[1]}")
+    if c.gap_rate:
+        lines.append(_gap_line(c.gap_rate))
+    elif c.gap is not None:
+        lines.append(f"Gap {c.gap:+.1%} is under 1%: no gap base rate")
+    usable = [r for r in c.conditions if r.usable]
+    other = [r for r in c.conditions if not r.usable]
+    lines += [_cond_line(r) for r in usable + other]
+    if not c.conditions:
+        lines.append("No tracked condition is active at the last close")
+    return lines
 
 
 def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
     lines = [f"# Pre-market report — {run_meta['session']}",
              f"Generated {run_meta['generated_ny']} / {run_meta['generated_local']} · "
-             f"forecast for the {run_meta['session']} session · M1 (range only)", ""]
+             f"forecast for the {run_meta['session']} session · M2 (range + base rates)", ""]
     if run_meta.get("global_warnings"):
         lines += [f"> **Data warning:** {w}" for w in run_meta["global_warnings"]] + [""]
     for c in cards:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "WARNINGS"):
+        for name in ("VOLATILITY", "BASE RATES", "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -124,6 +169,12 @@ h1{font-size:22px;margin:0 0 4px}.meta{color:var(--mute);font-size:13px;margin-b
 .bar .pm{position:absolute;top:2px;width:2px;height:26px;background:var(--high)}
 .axis{display:flex;justify-content:space-between;color:var(--mute);font-size:12px;font-variant-numeric:tabular-nums}
 .warn{color:var(--warn)}.event{color:var(--high);font-weight:600}
+table.br{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums;margin-top:4px}
+table.br th{text-align:right;font-weight:500;color:var(--mute);padding:3px 6px;border-bottom:1px solid var(--line)}
+table.br td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--line)}
+table.br th:first-child,table.br td:first-child{text-align:left}
+tr.ctx td{color:var(--mute)}.tblwrap{overflow-x:auto}
+.gapbox{border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:6px 0 8px;font-size:14px}
 footer{color:var(--mute);font-size:12px;margin-top:24px}
 @media (max-width:560px){.row{grid-template-columns:1fr}.lbl{padding-top:0}}
 """
@@ -151,18 +202,61 @@ def _bar_html(c: TickerCard) -> str:
     return f'<div class="bar">{"".join(parts)}</div>{axis}'
 
 
+def _pct(x: float, d: int = 0, sign: bool = False) -> str:
+    if x != x:  # NaN
+        return "—"
+    return f"{x:+.{d}%}" if sign else f"{x:.{d}%}"
+
+
+def _base_rates_html(c: TickerCard) -> str:
+    e = html.escape
+    parts = ['<div class="row"><div class="lbl">BASE RATES</div><div>']
+    if c.prior:
+        parts.append(f'<div>Prior: <b>{c.prior[0]:.1%}</b> of past days closed higher '
+                     f'<span class="small">(N = {c.prior[1]})</span></div>')
+    g = c.gap_rate
+    if g:
+        tag = "" if g.usable else f' <span class="small">· context only, N &lt; {MIN_CASES}</span>'
+        if g.n:
+            parts.append(f'<div class="gapbox">Past gaps {_pct(g.lo, 1, True)} to {_pct(g.hi, 1, True)} '
+                         f'<span class="small">(N = {g.n})</span>{tag}<br>'
+                         f'closed above the open <b>{_pct(g.p_close_above_open)}</b> · '
+                         f'gap filled same day <b>{_pct(g.p_gap_fills)}</b> · '
+                         f'mean open→close <b>{_pct(g.mean_open_to_close, 2, True)}</b> '
+                         f'(median {_pct(g.median_open_to_close, 2, True)})</div>')
+        else:
+            parts.append(f'<div class="gapbox">Gap {_pct(g.gap, 1, True)}: no similar past gaps</div>')
+    elif c.gap is not None:
+        parts.append(f'<div class="small">Gap {_pct(c.gap, 1, True)} is under 1%: no gap base rate.</div>')
+    if c.conditions:
+        rows = sorted(c.conditions, key=lambda r: (not r.usable, -r.n))
+        parts.append('<div class="tblwrap"><table class="br"><tr><th>Active condition</th><th>N</th>'
+                     '<th>Up next day</th><th>Mean</th><th>Median</th><th>Up in 5 days</th></tr>')
+        for r in rows:
+            label = e(r.label) + ("" if r.usable else " ·&nbsp;context only")
+            parts.append(f'<tr class="{"" if r.usable else "ctx"}"><td>{label}</td><td>{r.n}</td>'
+                         f'<td>{_pct(r.p_up_1d)}</td><td>{_pct(r.mean_ret_1d, 2, True)}</td>'
+                         f'<td>{_pct(r.median_ret_1d, 2, True)}</td><td>{_pct(r.p_up_5d)}</td></tr>')
+        parts.append(f'</table></div><div class="small">Conditions true at the {e(c.last_date)} close. '
+                     f'Rows with N &lt; {MIN_CASES} are context only.</div>')
+    else:
+        parts.append('<div class="small">No tracked condition is active at the last close.</div>')
+    parts.append('</div></div>')
+    return "".join(parts)
+
+
 def render_html(cards: list[TickerCard], run_meta: dict) -> str:
     e = html.escape
     body = [f"<h1>Pre-market report — {e(run_meta['session'])}</h1>",
             f'<div class="meta">Generated {e(run_meta["generated_ny"])} / {e(run_meta["generated_local"])} · '
-            f'forecast for the {e(run_meta["session"])} session · milestone M1 (range only)</div>']
+            f'forecast for the {e(run_meta["session"])} session · milestone M2 (range + base rates)</div>']
     for w in run_meta.get("global_warnings", []):
         body.append(f'<div class="gw">Data warning: {e(w)}</div>')
     for c in cards:
         f = c.forecast
         if c.premarket is not None:
             sub = (f"pre-market <b>${c.premarket:,.2f}</b> ({c.gap:+.1%}) at "
-                   f"{_fmt_ts(c.premarket_asof, 'America/New_York')} · last close ${c.last_close:,.2f} ({c.last_date})")
+                   f"{_fmt_ts(c.premarket_asof, 'America/New_York')} ({e(c.premarket_source)}) · last close ${c.last_close:,.2f} ({c.last_date})")
         else:
             sub = f"pre-market n/a · last close <b>${c.last_close:,.2f}</b> ({e(c.last_date)})"
         body.append(f'<section class="card"><h2>{e(c.ticker)}</h2><div class="sub">{sub}</div>')
@@ -182,13 +276,21 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
             body.append(f'<div class="small">GJR-GARCH(1,1)-t via {f.engine} on {f.n_obs} days · α {p.alpha:.3f} · '
                         f'γ {p.gamma:.3f} · β {p.beta:.3f} · ν {p.nu:.1f} · persistence {p.persistence:.3f}</div>')
             if c.event_day:
-                body.append(f'<div class="event">Event day: the pre-market gap {c.gap:+.1%} already exceeds one sigma.</div>')
+                if c.event_bands:
+                    (a68, b68), (a95, b95) = c.event_bands
+                    body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma. Widened with gap base rates: '
+                                f'68% ${a68:,.2f}–${b68:,.2f} · 95% ${a95:,.2f}–${b95:,.2f}</div>')
+                else:
+                    body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma; too few similar gaps to widen the band.</div>')
             body.append('</div></div>')
-        body.append('<div class="row"><div class="lbl">DIRECTION · NEWS</div>'
-                    '<div class="small">Not built yet (base rates M2, models M3, news + combiner M4).</div></div>')
+        body.append(_base_rates_html(c))
+        body.append('<div class="row"><div class="lbl">MODELS · NEWS</div>'
+                    '<div class="small">Not built yet (ML panel M3, news + combiner M4). No final P(up) until then.</div></div>')
         warn = "; ".join(e(w) for w in c.warnings) if c.warnings else "none"
         body.append(f'<div class="row"><div class="lbl">WARNINGS</div><div class="{"warn" if c.warnings else "small"}">{warn}</div></div>')
         body.append('</section>')
+    if run_meta.get("event_priors"):
+        body.append(f'<footer>{e(run_meta["event_priors"])}</footer>')
     body.append('<footer>Probabilities and ranges only; not a recommendation to trade. '
                 'Bands are centred on the last close; prices split-adjusted (yfinance).</footer>')
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'

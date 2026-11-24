@@ -1,7 +1,10 @@
 """Daily entry point:  python -m premarket.run [--offline] [--config PATH]
 
-M1 pipeline: prices (+ market context) -> feature table -> GJR-GARCH bands
--> out-of-sample 68% band coverage check -> HTML + Markdown report.
+Pipeline (M1 + M2): prices (+ market context) -> feature table -> GJR-GARCH
+bands -> out-of-sample 68% band coverage -> conditional and gap base rates
+(event-day band widening) -> HTML + Markdown report.
+
+What-if: --premarket NVDA=170.5 overrides the live pre-market quote.
 """
 
 from __future__ import annotations
@@ -15,7 +18,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import load_config
+from . import ROOT, load_config
+from . import baserates as B
 from . import data as D
 from . import features as F
 from . import garch as G
@@ -33,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=None)
     ap.add_argument("--offline", action="store_true", help="use cached data only")
+    ap.add_argument("--premarket", action="append", default=[], metavar="TICKER=PRICE",
+                    help="override the pre-market price (what-if / testing); repeatable")
+    ap.add_argument("--reports-dir", default=None, help="write reports here instead of config paths.reports")
     args = ap.parse_args(argv)
+    overrides = {k.upper(): float(v) for k, v in (o.split("=", 1) for o in args.premarket)}
 
     cfg = load_config(args.config)
     paths = cfg["paths"]
@@ -88,19 +96,43 @@ def main(argv: list[str] | None = None) -> int:
         if len(px) < gcfg["window"] + 1:
             warnings.append(f"only {len(px) - 1} returns of history (window {gcfg['window']})")
 
-        pm = D.get_premarket(t, manifest, args.offline, now)
+        if t in overrides:
+            pm = D.PreMarketQuote(t, overrides[t], now.isoformat(), "manual override")
+            warnings.append(f"pre-market price is a manual override (${overrides[t]:,.2f})")
+        else:
+            pm = D.get_premarket(t, manifest, args.offline, now)
         if pm.price is None:
             warnings.append(f"pre-market price unavailable ({pm.detail})")
 
-        cards.append(TickerCard(ticker=t, last_close=float(px["Close"].iloc[-1]),
-                                last_date=str(px.index[-1].date()), forecast=fc, coverage=cov,
-                                premarket=pm.price, premarket_asof=pm.asof_utc, warnings=warnings))
+        # Base rates (M2)
+        last_close = float(px["Close"].iloc[-1])
+        conds = B.conditional_rates(px, table)
+        gap = pm.price / last_close - 1 if pm.price is not None else None
+        gr = B.gap_rates(px, gap, fc.sigma_next / 100 if fc else None) if gap is not None else None
+        card = TickerCard(ticker=t, last_close=last_close,
+                          last_date=str(px.index[-1].date()), forecast=fc, coverage=cov,
+                          premarket=pm.price, premarket_asof=pm.asof_utc, warnings=warnings,
+                          prior=B.unconditional_rate(px), conditions=conds, gap_rate=gr,
+                          premarket_source=pm.source)
+        if fc and card.event_day:
+            card.event_bands = B.widened_bands(last_close, fc.band68, fc.band95, gr)
+        thin = [r.label for r in conds if not r.usable]
+        if thin:
+            warnings.append(f"too few base-rate cases (N < {B.MIN_CASES}): " + "; ".join(thin))
+        if gr is not None and not gr.usable:
+            warnings.append(f"only {gr.n} similar past gaps (N < {B.MIN_CASES})")
+        cards.append(card)
 
         if fc and cov:
             print(f"[{t}] close {fc.last_close:.2f} ({px.index[-1].date()}) | sigma {fc.sigma_next:.2f}% "
                   f"{fc.regime} | 68% {fc.band68[0]:.2f}-{fc.band68[1]:.2f} | "
                   f"95% {fc.band95[0]:.2f}-{fc.band95[1]:.2f} | 68% band coverage "
                   f"{cov.inside68:.1%} over {cov.n_days}d (95%: {cov.inside95:.1%})")
+        print(f"[{t}] prior P(up) {card.prior[0]:.1%} (N={card.prior[1]}) | active conditions: "
+              + (", ".join(f"{r.key} N={r.n} up {r.p_up_1d:.0%}" for r in conds) or "none"))
+        if gr is not None:
+            print(f"[{t}] gap {gr.gap:+.2%}: N={gr.n} close>open {gr.p_close_above_open:.0%} "
+                  f"fills {gr.p_gap_fills:.0%} mean o->c {gr.mean_open_to_close:+.2%}")
 
     if not cards:
         log.error("no tickers produced a card")
@@ -112,13 +144,25 @@ def main(argv: list[str] | None = None) -> int:
     if stale:
         global_warnings.append("built on cached/stale data for: " + ", ".join(stale))
     meta = run_meta_now(session, cfg["timezones"]["local"], global_warnings)
+    try:
+        priors = B.load_event_priors(ROOT / cfg.get("event_priors", "event_base_rates.json"))
+        n_cur = sum(p.usable for p in priors.values())
+        meta["event_priors"] = (f"Event priors: {len(priors)} types loaded, {n_cur} curated. "
+                                "Placeholders are shown for reference and never enter a probability; "
+                                "headline detection starts with the news module (M4).")
+    except Exception as exc:
+        global_warnings.append(f"event_base_rates.json unreadable: {exc}")
 
     run_dir = Path(paths["data"]) / "runs" / session
     manifest.write(run_dir / "run_manifest.json")
     (run_dir / "forecasts.json").write_text(json.dumps(
-        {c.ticker: (c.forecast.to_dict() if c.forecast else None) for c in cards}, indent=2, default=str))
+        {c.ticker: {"garch": c.forecast.to_dict() if c.forecast else None,
+                    "premarket": c.premarket, "prior": c.prior,
+                    "conditions": [B.to_dict(r) for r in c.conditions],
+                    "gap": B.to_dict(c.gap_rate) if c.gap_rate else None,
+                    "event_bands": c.event_bands} for c in cards}, indent=2, default=str))
 
-    html_path, md_path = write_reports(cards, meta, paths["reports"])
+    html_path, md_path = write_reports(cards, meta, args.reports_dir or paths["reports"])
     print(f"report: {html_path}\nsummary: {md_path}\nmanifest: {run_dir / 'run_manifest.json'}")
     return 0
 
