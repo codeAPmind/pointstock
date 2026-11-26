@@ -63,7 +63,7 @@ def _post(url: str, payload: dict, api_key: str, timeout: int) -> dict:
 
 
 def deepseek_json(system: str, user: str, schema: dict, role: str = "news",
-                  max_tokens: int = 8000, timeout: int = 180, env=None) -> tuple[dict, str]:
+                  max_tokens: int = 16000, timeout: int = 240, env=None) -> tuple[dict, str]:
     """One JSON-mode chat completion. Returns (parsed object, model id that answered)."""
     env = env if env is not None else os.environ
     key = env.get("DEEPSEEK_API_KEY")

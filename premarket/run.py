@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from . import features as F
 from . import garch as G
 from . import combine as C
 from . import ledger as L
+from . import macro as MC
 from . import models as M
 from . import news as N
 from . import notify as NT
@@ -43,6 +45,54 @@ def next_session(last_bar: pd.Timestamp) -> pd.Timestamp:
         return pd.Timestamp(S._calendar().next_session(pd.Timestamp(last_bar).normalize())).tz_localize(None)
     except Exception:
         return (last_bar + pd.offsets.BDay(1)).normalize()
+
+
+def _resolve(path: str | None) -> Path | None:
+    if not path:
+        return None
+    p = Path(path)
+    return p if p.is_absolute() else (ROOT / p).resolve()
+
+
+def build_macro_context(t, tn, ind, mcfg, px, pm, spy_px, spy_gap, futures, fut_failed, cal_events,
+                        cal_warn, surprises, release_dates, macro_raw, macro_failed, company_news,
+                        provider, paths, years, manifest, offline, now) -> MC.MacroContext:
+    """Gap split, event-day volatility, sensitivities and scored macro/industry headlines for one ticker."""
+    warnings = list(cal_warn)
+    if fut_failed:
+        warnings.append("futures unavailable: " + ", ".join(fut_failed))
+    last_close = float(px["Close"].iloc[-1])
+    # Gap split into market / sector / stock-specific
+    split, sec_sym, sec_gap = None, ind.get("etf"), None
+    if pm.price is not None and spy_gap is not None and spy_px is not None:
+        sec_px = None
+        if sec_sym:
+            try:
+                sec_px = D.get_prices(sec_sym, paths["data"], years, manifest, offline, now)
+                sq = D.get_premarket(sec_sym, manifest, offline, now)
+                if sq.price:
+                    sec_gap = math.log(sq.price / float(sec_px["Close"].iloc[-1]))
+            except Exception as exc:
+                warnings.append(f"sector ETF {sec_sym} unavailable ({type(exc).__name__})")
+        split = MC.gap_decomposition(px["Close"], spy_px["Close"], sec_px["Close"] if sec_px is not None else None,
+                                     math.log(pm.price / last_close), spy_gap, sec_gap)
+    # Event-day volatility
+    asof = pd.Timestamp(S.session_date(now))
+    mult, details = MC.vol_multiplier(px["Close"], cal_events, release_dates, asof)
+    # Headlines: shared macro + this ticker's industry queries, minus its own company headlines
+    ind_raw, ind_failed = MC.fetch_headlines(ind.get("queries", []), f"{t}_IND", paths["data"], now,
+                                             mcfg.get("hours", 24), offline)
+    own = {N._key(h.title) for h in company_news.headlines} if company_news else set()
+    pool = [h for h in MC.dedupe(macro_raw + ind_raw) if N._key(h["title"]) not in own
+            and not N.is_relevant(h["title"], t, tn.get("names", [t]))]
+    if macro_failed or ind_failed:
+        warnings.append("some macro/industry headline queries failed (cache used where available)")
+    mnews = MC.score_macro_news(t, tn.get("company", t), ind.get("exposure", "the US stock market"), pool, provider)
+    warnings += mnews.warnings
+    return MC.MacroContext(futures=futures, events=cal_events, surprises=surprises, gap_split=split,
+                           sector_symbol=sec_sym, sector_gap=sec_gap, vol_mult=mult, vol_details=details,
+                           sensitivity=MC.sensitivity(_resolve(mcfg.get("sensitivity_parquet")), t),
+                           news=mnews, warnings=warnings)
 
 
 def combine_card(c: TickerCard, disabled: list[str]) -> C.Combined:
@@ -64,6 +114,12 @@ def combine_card(c: TickerCard, disabled: list[str]) -> C.Combined:
             continue
         w = 0.0 if "p_baserate" in disabled else C.condition_weight(r.n)
         sig.append(C.Signal(f"cond:{r.key}", f"Base rate “{r.label}”", r.p_up_1d, p_uncond, w, f"N = {r.n}"))
+    mn = c.macro.news if c.macro is not None else None
+    if mn is not None and mn.score is not None:
+        p_macro = MC.macro_probability(mn.score, p_uncond)
+        w = 0.0 if "p_macro" in disabled else MC.MACRO_WEIGHT
+        sig.append(C.Signal("macro", "Macro & industry news", p_macro, p_uncond, w,
+                            f"score {mn.score:+.2f}, {len(mn.headlines)} headlines, {mn.scorer}"))
     if c.news is not None and c.news.score is not None:
         p_news = N.news_probability(c.news.score, p_uncond)
         w = 0.0 if "p_news" in disabled else C.NEWS_WEIGHT
@@ -78,12 +134,16 @@ def ledger_row(c: TickerCard, session: str, now: datetime) -> dict:
     b95 = c.event_bands[1] if c.event_bands else (f.band95 if f else (None, None))
     ml = next((s for s in cb.signals if s.name == "ml"), None)
     nw = next((s for s in cb.signals if s.name == "news"), None)
+    mc = next((s for s in cb.signals if s.name == "macro"), None)
     conds = [s for s in cb.signals if s.name.startswith("cond:")]
     return {
         "date": session, "ticker": c.ticker, "last_close_date": c.last_date, "last_close": c.last_close,
         "premarket": c.premarket, "gap": c.gap, "p_uncond": c.prior[0], "p_prior": cb.p0,
         "p_ml": c.direction.p_ml if c.direction else None,
         "p_news": nw.p if nw else None, "p_baserate": C.baserate_only(c.prior[0], cb.signals),
+        "p_macro": mc.p if mc else None, "w_macro": mc.weight if mc else 0.0,
+        "macro_events": ";".join(sorted({e.key for e in c.macro.events})) if c.macro else "",
+        "macro_vol_mult": c.macro.vol_mult if c.macro else 1.0,
         "p_final": cb.p_final, "w_ml": ml.weight if ml else 0.0, "w_news": nw.weight if nw else 0.0,
         "w_baserate": sum(s.weight for s in conds), "sigma_pred": f.sigma_next / 100 if f else None,
         "band68_low": b68[0], "band68_high": b68[1], "band95_low": b95[0], "band95_high": b95[1],
@@ -167,6 +227,25 @@ def main(argv: list[str] | None = None) -> int:
             market[name] = D.get_prices(sym, paths["data"], years, manifest, args.offline, now)
         except Exception as exc:
             log.warning("market context %s unavailable: %s", sym, exc)
+
+    # Macro context shared by all tickers: futures, today's calendar, macro headlines
+    mcfg, icfg = cfg.get("macro", {}), cfg.get("industry", {})
+    day_ny = S.session_date(now)
+    spy_px = market.get("SPY")
+    prev_close_utc = (datetime.combine(spy_px.index[-1].date(), datetime.min.time().replace(hour=16),
+                                       tzinfo=MC.NY).astimezone(timezone.utc) if spy_px is not None else now)
+    futures, fut_failed = MC.futures_moves(mcfg.get("futures", {}), prev_close_utc, now, args.offline)
+    cal_events, cal_warn = MC.todays_calendar(day_ny, mcfg, paths["data"], args.offline)
+    release_dates = MC.load_release_dates(_resolve(mcfg.get("release_dates_parquet")))
+    macro_raw, macro_failed = MC.fetch_headlines(mcfg.get("headline_queries", []), "MACRO", paths["data"],
+                                                 now, mcfg.get("hours", 24), args.offline)
+    spy_pm = None if args.offline else D.get_premarket("SPY", manifest, False, now)
+    spy_gap = (math.log(spy_pm.price / float(spy_px["Close"].iloc[-1]))
+               if spy_pm and spy_pm.price and spy_px is not None else None)
+    surprises = MC.group_surprise(cal_events)
+    print(f"macro: {len(cal_events)} calendar event(s) today "
+          f"[{', '.join(sorted({e.key for e in cal_events})) or 'none'}], {len(macro_raw)} macro headlines, "
+          f"SPY pre-market {'n/a' if spy_gap is None else f'{spy_gap:+.2%}'}")
 
     cards: list[TickerCard] = []
     last_bars: list[pd.Timestamp] = []
@@ -260,8 +339,24 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 log.exception("%s: panel failed", t)
                 warnings.append(f"analyst panel failed: {exc}")
+        # Macro and industry context (M4b)
+        try:
+            card.macro = build_macro_context(
+                t, tn, icfg.get(t, {}), mcfg, px, pm, spy_px, spy_gap, futures, fut_failed, cal_events,
+                cal_warn, surprises, release_dates, macro_raw, macro_failed, card.news, provider,
+                paths, years, manifest, args.offline, now)
+            warnings.extend(card.macro.warnings)
+        except Exception as exc:
+            log.exception("%s: macro context failed", t)
+            warnings.append(f"macro context failed: {exc}")
         if fc and card.event_day:
             card.event_bands = B.widened_bands(last_close, fc.band68, fc.band95, gr)
+        if fc and card.macro is not None and card.macro.vol_mult > 1:
+            m = card.macro.vol_mult
+            b68, b95 = card.event_bands or (fc.band68, fc.band95)
+            w68, w95 = MC.widen(last_close, fc.band68, m), MC.widen(last_close, fc.band95, m)
+            card.event_bands = ((min(b68[0], w68[0]), max(b68[1], w68[1])),
+                                (min(b95[0], w95[0]), max(b95[1], w95[1])))
         thin = [r.label for r in conds if not r.usable]
         if thin:
             warnings.append(f"too few base-rate cases (N < {B.MIN_CASES}): " + "; ".join(thin))

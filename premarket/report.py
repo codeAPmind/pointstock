@@ -20,6 +20,7 @@ from .garch import Coverage, GarchForecast
 from .combine import Combined
 from .models import DirectionForecast
 from .news import NewsResult
+from . import macro as MC
 
 
 @dataclass
@@ -42,6 +43,7 @@ class TickerCard:
     combined: Combined | None = None
     panels: list = field(default_factory=list)      # panel.PanelOutcome
     technical: TechnicalRead | None = None
+    macro: "MC.MacroContext | None" = None
 
     @property
     def gap(self) -> float | None:
@@ -96,11 +98,17 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
                 out["VOLATILITY"].append(
                     f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma ({f.sigma_next:.2f}%); "
                     f"too few similar gaps to widen the band")
+        if c.macro is not None and c.macro.vol_mult > 1 and c.event_bands:
+            (a68, b68), (a95, b95) = c.event_bands
+            out["VOLATILITY"].append(
+                f"MACRO DAY: {_macro_event_names(c.macro)} → band widened ×{c.macro.vol_mult:.2f} "
+                f"(this stock's past moves on these releases): 68% ${a68:,.2f}–${b68:,.2f} · 95% ${a95:,.2f}–${b95:,.2f}")
     out["TECHNICAL"] = technical_lines(c)
     out["DIRECTION"] = direction_lines(c)
     out["MODELS"] = model_lines(c)
     out["BASE RATES"] = base_rate_lines(c)
     out["NEWS"] = news_lines(c)
+    out["MACRO"] = macro_lines(c)
     out["EVENTS"] = event_lines(c)
     out["WARNINGS"] = c.warnings or ["none"]
     return out
@@ -117,6 +125,64 @@ def _px(x: float | None) -> str:
 
 def _dist(x: float | None) -> str:
     return "n/a" if x is None else f"{x:+.1%}"
+
+
+def _macro_event_names(m) -> str:
+    seen, out = set(), []
+    for e in m.events:
+        label = MC.EVENT_NAMES.get(e.key, e.name if e.key.startswith("auction") else e.key)
+        if e.key.startswith("auction"):
+            label = e.name
+        if label not in seen:
+            seen.add(label)
+            out.append(f"{label} {e.time_et} ET")
+    return ", ".join(out) or "none"
+
+
+def _fut_line(m) -> str:
+    parts = [f"{f.name} {f.change:+.2%}" for f in m.futures if f.change is not None]
+    return " · ".join(parts) if parts else "futures unavailable"
+
+
+def macro_lines(c: TickerCard) -> list[str]:
+    m = c.macro
+    if m is None:
+        return ["not available"]
+    lines = [f"Futures since last close: {_fut_line(m)}"]
+    g = m.gap_split
+    if g is not None:
+        sec = (f" + sector {g.sector:+.2%} ({m.sector_symbol} β {g.beta_sector:.2f})"
+               if g.beta_sector is not None else "")
+        lines.append(f"Gap {g.gap:+.2%} = market {g.market:+.2%} (SPY β {g.beta_mkt:.2f}){sec} "
+                     f"+ stock-specific {g.stock_specific:+.2%}  [R² {g.r2:.2f}, {g.n} days]")
+    if m.events:
+        lines.append(f"Today: {_macro_event_names(m)}")
+        for e in m.events:
+            if e.actual is not None and e.estimate is not None:
+                lines.append(f"  {e.name}: actual {e.actual:g}{e.unit} vs est {e.estimate:g}{e.unit}"
+                             + (f" → surprise z {e.surprise_z:+.1f} (hawkish +)" if e.surprise_z is not None else ""))
+        for d in m.vol_details:
+            if d["ratio"] is not None:
+                lines.append(f"  {d['key']}: past moves {d['ratio']:.2f}× normal variance, N = {d['n']}"
+                             + ("" if d["used"] else " (not used)"))
+        for k, z in m.surprises.items():
+            s = m.sensitivity.get(k)
+            if s:
+                lines.append(f"  history: {k} reaction {s['b']:+.2%} per +1σ hawkish shock (t {s['t']:+.1f}, N {s['n']}); "
+                             f"context only, no direction weight")
+    else:
+        lines.append("Today: no tracked macro release, FOMC or Treasury auction")
+    mn = m.news
+    if mn is not None:
+        if mn.headlines:
+            head = (f"score {mn.score:+.2f}" if mn.score is not None else "score n/a") + \
+                f" · {len(mn.headlines)} relevant of {mn.n_fetched} macro/industry headlines · {mn.scorer}"
+            lines.append(head)
+            for h in sorted(mn.headlines, key=lambda h: (-h.materiality, -abs(h.sentiment)))[:5]:
+                lines.append(f"{h.sentiment:+.1f} m{h.materiality} [{h.event_type}] {h.title}  ({h.source}, {_age(h.published_utc)})")
+        else:
+            lines.append(f"{mn.n_fetched} macro/industry headlines fetched, none scored relevant ({mn.scorer})")
+    return lines
 
 
 def technical_lines(c: TickerCard) -> list[str]:
@@ -258,7 +324,8 @@ def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "TECHNICAL", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "EVENTS", "WARNINGS"):
+        for name in ("VOLATILITY", "TECHNICAL", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "MACRO", "EVENTS",
+                     "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -406,6 +473,60 @@ def _news_html(c: TickerCard) -> str:
     return "".join(parts)
 
 
+def _macro_html(c: TickerCard) -> str:
+    m = c.macro
+    e = html.escape
+    parts = ['<div class="row"><div class="lbl">MACRO · INDUSTRY</div><div>']
+    if m is None:
+        parts.append('<div class="small">Macro context not available.</div></div></div>')
+        return "".join(parts)
+    parts.append(f'<div class="small">Futures since last close: {e(_fut_line(m))}</div>')
+    g = m.gap_split
+    if g is not None:
+        sec = (f' + sector <b>{g.sector:+.2%}</b> ({e(m.sector_symbol or "")} β {g.beta_sector:.2f})'
+               if g.beta_sector is not None else "")
+        parts.append(f'<div>Gap {g.gap:+.2%} = market <b>{g.market:+.2%}</b> (SPY β {g.beta_mkt:.2f}){sec} '
+                     f'+ stock-specific <b>{g.stock_specific:+.2%}</b> '
+                     f'<span class="small">R² {g.r2:.2f} over {g.n} days</span></div>')
+    if m.events:
+        parts.append(f'<div>Today: <b>{e(_macro_event_names(m))}</b></div>')
+        for ev in m.events:
+            if ev.actual is not None and ev.estimate is not None:
+                z = f" → surprise z {ev.surprise_z:+.1f} (hawkish +)" if ev.surprise_z is not None else ""
+                parts.append(f'<div class="small">{e(ev.name)}: actual {ev.actual:g}{e(ev.unit)} vs est '
+                             f'{ev.estimate:g}{e(ev.unit)}{z}</div>')
+        vd = [d for d in m.vol_details if d["ratio"] is not None]
+        if vd:
+            parts.append('<div class="small">Past moves on these releases: ' + " · ".join(
+                f'{e(d["key"])} {d["ratio"]:.2f}× variance (N {d["n"]}{"" if d["used"] else ", not used"})' for d in vd)
+                + '</div>')
+        for k in m.surprises:
+            s = m.sensitivity.get(k)
+            if s:
+                parts.append(f'<div class="small">History: {e(k)} reaction {s["b"]:+.2%} per +1σ hawkish shock '
+                             f'(t {s["t"]:+.1f}, N {s["n"]}). Context only: surprises predict the opening gap, '
+                             f'not the move after the open.</div>')
+    else:
+        parts.append('<div class="small">No tracked macro release, FOMC or Treasury auction today.</div>')
+    mn = m.news
+    if mn is not None and mn.headlines:
+        meta = (f'score <b>{mn.score:+.2f}</b>' if mn.score is not None else 'score n/a') + \
+            f' <span class="small">· {len(mn.headlines)} relevant of {mn.n_fetched} macro/industry headlines · {e(mn.scorer)}</span>'
+        parts.append(f'<div>{meta}</div>')
+        parts.append('<div class="tblwrap"><table class="br"><tr><th>Headline</th><th>Type</th><th>Tone</th>'
+                     '<th>Mat.</th><th>Why</th></tr>')
+        for h in sorted(mn.headlines, key=lambda h: (-h.materiality, -abs(h.sentiment)))[:6]:
+            title = f'<a href="{e(h.url)}" style="color:inherit">{e(h.title)}</a>' if h.url else e(h.title)
+            parts.append(f'<tr><td style="text-align:left">{title}<div class="small">{e(h.source)}, {_age(h.published_utc)}</div></td>'
+                         f'<td>{e(h.event_type)}</td><td>{h.sentiment:+.1f}</td><td>{h.materiality}</td>'
+                         f'<td style="text-align:left" class="small">{e(h.why)}</td></tr>')
+        parts.append('</table></div>')
+    elif mn is not None:
+        parts.append(f'<div class="small">{mn.n_fetched} macro/industry headlines fetched; none relevant or not scored ({e(mn.scorer)}).</div>')
+    parts.append('</div></div>')
+    return "".join(parts)
+
+
 def _events_html(c: TickerCard) -> str:
     e = html.escape
     parts = ['<div class="row"><div class="lbl">EVENTS</div><div>']
@@ -543,12 +664,18 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
                                 f'68% ${a68:,.2f}–${b68:,.2f} · 95% ${a95:,.2f}–${b95:,.2f}</div>')
                 else:
                     body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma; too few similar gaps to widen the band.</div>')
+            if c.macro is not None and c.macro.vol_mult > 1 and c.event_bands:
+                (a68, b68), (a95, b95) = c.event_bands
+                body.append(f'<div class="event">Macro day: {html.escape(_macro_event_names(c.macro))}. Band widened '
+                            f'×{c.macro.vol_mult:.2f} from this stock\'s past moves on these releases: '
+                            f'68% ${a68:,.2f}–${b68:,.2f} · 95% ${a95:,.2f}–${b95:,.2f}</div>')
             body.append('</div></div>')
         body.append(_technical_html(c))
         body.append(_direction_html(c))
         body.append(_models_html(c))
         body.append(_base_rates_html(c))
         body.append(_news_html(c))
+        body.append(_macro_html(c))
         body.append(_events_html(c))
         warn = "; ".join(e(w) for w in c.warnings) if c.warnings else "none"
         body.append(f'<div class="row"><div class="lbl">WARNINGS</div><div class="{"warn" if c.warnings else "small"}">{warn}</div></div>')

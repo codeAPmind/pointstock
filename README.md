@@ -29,6 +29,27 @@ python -m pytest                   # look-ahead, GARCH recovery, base-rate and w
 
 Tickers and settings live in `config.json`. Data cache: `data/prices/`, models: `data/models/`, run manifests: `data/runs/<session>/`. The morning run only loads saved models; if none exist it runs the refit first (~10 s per ticker).
 
+## Macro and industry context
+
+Each card has a MACRO · INDUSTRY section (`premarket/macro.py`), built on the findings of
+`../MacroEventQuntify`:
+
+- **Futures since the last close** (S&P, Nasdaq, Russell, 10Y note, oil, gold, dollar) and the stock's
+  pre-market gap split into market (SPY beta), sector (sector-ETF beta beyond the market) and
+  stock-specific parts.
+- **Today's macro calendar**: CPI, jobs, PPI, PCE, retail sales, GDP, claims and ISM from the FMP economic
+  calendar (needs `FMP_API_KEY` in `.env`), FOMC days (`config.json` → `macro.fomc_dates`, update each
+  January) and Treasury Note/Bond auctions (fiscaldata, no key). Released surprises are shown as z,
+  signed hawkish-positive.
+- **Event-day bands**: the band widens by √(variance ratio) of this stock's past moves on the same
+  release type (release dates from MacroEventQuntify's `events.parquet`; only with N ≥ 20; capped ×2).
+- **Macro and industry headlines** (`macro.headline_queries` + `industry.<TICKER>.queries`), scored for
+  the stock's exposures by the LLM → signal `p_macro`, weight 0.2, tracked in the ledger and cut to 0
+  automatically if its 60-day BSS is negative.
+
+Macro surprises do not move P(up). MacroEventQuntify's walk-forward found they rank the opening gap
+(IC ≈ 0.05) but not returns after the open (IC ≈ 0.005), so they widen bands and are shown as context.
+
 ## LLM provider (headline scoring and analyst panel)
 
 `config.json` → `"llm": {"provider": "deepseek"}` (or `"anthropic"`, or `"auto"`). DeepSeek settings
@@ -62,6 +83,7 @@ Push channels and the API key go in `PointStock/.env` (git-ignored, loaded by th
 
 ```
 DEEPSEEK_API_KEY=...
+FMP_API_KEY=...          # optional: macro calendar with consensus and actuals
 PREMARKET_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/...
 # or PREMARKET_TELEGRAM_BOT_TOKEN / PREMARKET_TELEGRAM_CHAT_ID
 # or PREMARKET_SMTP_HOST / _PORT / _USER / _PASSWORD, PREMARKET_EMAIL_FROM / _TO

@@ -60,6 +60,17 @@ def summary_text(cards, meta: dict, report_path: Path | None = None) -> str:
             top = max(c.news.headlines, key=lambda h: (h.materiality, abs(h.sentiment)))
             lines.append(f"  news {c.news.score:+.2f} · {top.title[:90]}" if c.news.score is not None
                          else f"  news · {top.title[:90]}")
+        m = getattr(c, "macro", None)
+        if m is not None:
+            bits = []
+            if m.gap_split is not None:
+                bits.append(f"gap: market {m.gap_split.market:+.1%}, stock {m.gap_split.stock_specific:+.1%}")
+            if m.events:
+                bits.append("today: " + ", ".join(sorted({e.key for e in m.events})))
+            if m.news is not None and m.news.score is not None:
+                bits.append(f"macro/industry news {m.news.score:+.2f}")
+            if bits:
+                lines.append("  " + " · ".join(bits))
         for o in getattr(c, "panels", []) or []:
             r = o.record.latest
             if r:

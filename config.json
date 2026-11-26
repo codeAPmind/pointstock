@@ -56,5 +56,64 @@
   },
   "llm": {
     "provider": "deepseek"
+  },
+  "macro": {
+    "hours": 24,
+    "futures": {
+      "S&P 500 fut": "ES=F",
+      "Nasdaq 100 fut": "NQ=F",
+      "Russell 2000 fut": "RTY=F",
+      "10Y T-note fut": "ZN=F",
+      "Crude oil": "CL=F",
+      "Gold": "GC=F",
+      "Dollar index": "DX-Y.NYB"
+    },
+    "headline_queries": [
+      "Federal Reserve interest rates",
+      "Treasury yields bond market",
+      "US inflation CPI",
+      "US jobs report economy",
+      "tariffs trade policy",
+      "stock market futures today"
+    ],
+    "release_dates_parquet": "../MacroEventQuntify/data_store/tables/events.parquet",
+    "sensitivity_parquet": "../MacroEventQuntify/data_store/tables/pool_sens.parquet",
+    "fomc_dates": [
+      "2026-01-28",
+      "2026-03-18",
+      "2026-04-29",
+      "2026-06-17",
+      "2026-07-29",
+      "2026-09-16",
+      "2026-10-28",
+      "2026-12-09"
+    ],
+    "_fomc_note": "From MacroEventQuntify/config/fomc_dates.yaml; add next year's dates each January. FMP (FMP_API_KEY) also reports FOMC days."
+  },
+  "industry": {
+    "TSLA": {
+      "etf": null,
+      "exposure": "EV demand and pricing, autonomous driving and robotaxi regulation, tariffs and China, battery and lithium costs, interest rates via auto loans and growth valuation",
+      "queries": [
+        "electric vehicle sales demand",
+        "robotaxi autonomous driving regulation"
+      ]
+    },
+    "NVDA": {
+      "etf": "SOXX",
+      "exposure": "AI data-center spending by hyperscalers, semiconductor export controls to China, chip supply chain (TSMC, HBM memory), competitors (AMD, custom chips), interest rates via growth valuation",
+      "queries": [
+        "semiconductor stocks AI chips",
+        "chip export controls China"
+      ]
+    },
+    "OPEN": {
+      "etf": "XHB",
+      "exposure": "US mortgage rates and housing demand, existing-home sales and prices, Fed policy, small-cap and speculative risk appetite",
+      "queries": [
+        "mortgage rates",
+        "US housing market home sales"
+      ]
+    }
   }
 }

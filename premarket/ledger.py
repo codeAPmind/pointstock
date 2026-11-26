@@ -22,9 +22,10 @@ COLUMNS = [
     "band95_low", "band95_high", "active_conditions", "event_types", "news_scorer",
     "outcome_up", "actual_close", "actual_ret", "inside_band68",
     "model_version", "prompt_version", "created_utc",
+    "p_macro", "w_macro", "macro_events", "macro_vol_mult",
 ]
 OUTCOME_COLS = ["outcome_up", "actual_close", "actual_ret", "inside_band68"]
-SIGNALS = ["p_final", "p_ml", "p_news", "p_baserate", "p_prior"]
+SIGNALS = ["p_final", "p_ml", "p_news", "p_macro", "p_baserate", "p_prior"]
 WINDOW = 60
 
 
@@ -99,7 +100,7 @@ class Scorecard:
         if self.n_scored == 0:
             return "Ledger: no scored forecasts yet (outcomes fill in the morning after each session)."
         parts = [f"Last {min(self.n_scored, self.window)} scored rows:"]
-        for k in ("p_final", "p_ml", "p_news", "p_baserate"):
+        for k in ("p_final", "p_ml", "p_news", "p_macro", "p_baserate"):
             v = self.bss.get(k)
             if v is not None:
                 parts.append(f"{k} BSS {v:+.3f} (n={self.n_by_signal[k]})")
@@ -133,7 +134,7 @@ def score(df: pd.DataFrame, window: int = WINDOW) -> Scorecard:
         for interval, g in tail.groupby(cut, observed=True):
             cal.append({"bin": f"{interval.left:.0%}-{interval.right:.0%}", "n": len(g),
                         "forecast": float(g["p_final"].mean()), "actual": float(g["outcome_up"].mean())})
-    disabled = [s for s in ("p_ml", "p_news", "p_baserate")
+    disabled = [s for s in ("p_ml", "p_news", "p_macro", "p_baserate")
                 if ns[s] >= window and bss[s] is not None and bss[s] < 0]
     return Scorecard(n_scored=len(done), window=window, bss=bss, n_by_signal=ns,
                      band_coverage=float(cov.mean()) if len(cov) else None,
