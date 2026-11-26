@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from premarket.features import TARGET_COLS, build_features, feature_columns
+from premarket.features import TARGET_COLS, build_features, feature_columns, technical_read
+from premarket.report import TickerCard, card_lines
 
 
 def test_shift_by_one_day_changes_every_feature_on_last_row(ohlcv, market):
@@ -37,6 +38,42 @@ def test_future_market_data_is_not_used(ohlcv, market):
     b = build_features(short, market, sector="SOXX")
     cols = feature_columns(a)
     pd.testing.assert_frame_equal(a[cols], b[cols])
+
+
+def test_technical_read_recovers_levels_and_tally():
+    table = pd.DataFrame({
+        "dist_ma20": [100 / 90 - 1],
+        "dist_ma50": [100 / 80 - 1],
+        "dist_ma200": [100 / 70 - 1],
+        "rsi14": [55.0],
+        "macd_hist_pct": [-0.004],
+    }, index=pd.to_datetime(["2024-01-02"]))
+    r = technical_read(table, close=100.0, asof="2024-01-02")
+    assert r.ma20 == pytest.approx(90)
+    assert r.ma50 == pytest.approx(80)
+    assert r.ma200 == pytest.approx(70)
+    assert r.stack == "20 > 50 > 200"
+    assert r.rsi_band == "50–70"
+    assert r.macd_side == "below zero"
+    assert (r.checks_up, r.checks_n) == (4, 5)
+
+
+def test_technical_read_mixed_stack_skips_missing():
+    table = pd.DataFrame({
+        "dist_ma20": [0.01],
+        "dist_ma50": [-0.02],
+        "dist_ma200": [np.nan],
+        "rsi14": [28.0],
+        "macd_hist_pct": [0.001],
+    }, index=pd.to_datetime(["2024-01-02"]))
+    r = technical_read(table, close=10.0, asof="2024-01-02")
+    assert r.stack == "incomplete"
+    assert r.ma200 is None
+    assert r.rsi_band == "below 30"
+    assert (r.checks_up, r.checks_n) == (2, 4)
+    card = TickerCard("OPEN", 10.0, "2024-01-02", None, None, None, None, technical=r)
+    text = " ".join(card_lines(card)["TECHNICAL"])
+    assert "combiner weight 0" in text and "RSI(14) 28.0" in text and "MA200 n/a" in text
 
 
 def test_targets_are_forward_and_last_row_unknown(ohlcv):

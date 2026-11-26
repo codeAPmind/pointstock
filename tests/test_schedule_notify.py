@@ -1,4 +1,6 @@
 """Scheduling guard (holidays, window, once per session) and push summary/channels."""
+import json
+import smtplib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -76,3 +78,69 @@ def test_push_isolates_failures(monkeypatch):
 
 def test_push_without_channels_sends_nothing():
     assert NT.push([_card()], META, None, {}) == {}
+
+
+def test_email_retries_transient_disconnect(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(env, msg):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(NT, "_smtp_once", flaky)
+    monkeypatch.setattr(NT.time, "sleep", lambda s: None)
+    env = {"PREMARKET_SMTP_HOST": "smtp.gmail.com", "PREMARKET_SMTP_PORT": "587",
+           "PREMARKET_SMTP_USER": "a@b.c", "PREMARKET_SMTP_PASSWORD": "x",
+           "PREMARKET_EMAIL_FROM": "a@b.c", "PREMARKET_EMAIL_TO": "d@e.f"}
+    assert NT.send_email(env, "subj", "body", None) == 3
+    assert calls["n"] == 3
+
+
+def test_email_auth_failure_is_not_retried(monkeypatch):
+    calls = {"n": 0}
+
+    def auth(env, msg):
+        calls["n"] += 1
+        raise smtplib.SMTPAuthenticationError(535, b"bad")
+
+    monkeypatch.setattr(NT, "_smtp_once", auth)
+    monkeypatch.setattr(NT.time, "sleep", lambda s: None)
+    env = {"PREMARKET_SMTP_HOST": "smtp.gmail.com", "PREMARKET_SMTP_PORT": "587",
+           "PREMARKET_SMTP_USER": "a@b.c", "PREMARKET_SMTP_PASSWORD": "x",
+           "PREMARKET_EMAIL_FROM": "a@b.c", "PREMARKET_EMAIL_TO": "d@e.f"}
+    with pytest.raises(smtplib.SMTPAuthenticationError):
+        NT.send_email(env, "subj", "body", None)
+    assert calls["n"] == 1
+
+
+def test_push_records_email_failure_and_resend(monkeypatch, tmp_path):
+    monkeypatch.setattr(NT.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def always_down(env, msg):
+        attempts["n"] += 1
+        raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(NT, "_smtp_once", always_down)
+    env = {"PREMARKET_SMTP_HOST": "smtp.gmail.com", "PREMARKET_SMTP_PORT": "587",
+           "PREMARKET_SMTP_USER": "a@b.c", "PREMARKET_SMTP_PASSWORD": "x",
+           "PREMARKET_EMAIL_FROM": "a@b.c", "PREMARKET_EMAIL_TO": "d@e.f"}
+    data, logs, reports = tmp_path / "data", tmp_path / "logs", tmp_path / "reports"
+    res = NT.push([_card()], META, None, env, data_dir=data, logs_dir=logs)
+    assert res == {"email": "failed: SMTPServerDisconnected"}
+    assert NT.failed_channels(data, "2026-11-24") == ["email"]
+    state = json.loads((data / "runs" / "2026-11-24" / "notify.json").read_text())
+    assert state["channels"]["email"]["attempts"] == 3
+    assert state["channels"]["email"]["status"] == "failed"
+    lines = (logs / "notify.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["source"] == "push"
+
+    def ok(env, msg):
+        attempts["n"] += 1
+
+    monkeypatch.setattr(NT, "_smtp_once", ok)
+    again = NT.resend("2026-11-24", data, reports, logs, env)
+    assert again == {"email": "sent"}
+    assert NT.failed_channels(data, "2026-11-24") == []
+    assert NT.resend("2026-11-24", data, reports, logs, env) == {}

@@ -47,7 +47,11 @@ honest gap base rate is not pulled back toward 50%.
 
 `scripts/run_premarket.sh` runs `python -m premarket.run --scheduled`: it skips NYSE holidays and
 weekends, runs only between 08:15 and 09:25 ET, once per session (stamp in `data/runs/<date>/DONE`),
-then pushes the summary. The machine clock is Singapore time, so cron fires at both 20:30 and 21:30
+then pushes the summary. Email retries a dropped SMTP connection up to 3 times (auth errors
+are not retried). Each result is appended to `logs/notify.jsonl` and the latest per-channel
+status is kept in `data/runs/<date>/notify.json`. If a channel failed, the next scheduled
+wake-up inside the window resends only that channel; `python -m premarket.run --resend [YYYY-MM-DD]`
+does the same on demand. The machine clock is Singapore time, so cron fires at both 20:30 and 21:30
 (08:30 ET in summer and winter) with :45 retries; see `scripts/crontab.txt`. Logs: `logs/cron.log`.
 
 ```bash

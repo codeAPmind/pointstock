@@ -15,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .baserates import MIN_CASES, ConditionalRate, GapRate
+from .features import TechnicalRead
 from .garch import Coverage, GarchForecast
 from .combine import Combined
 from .models import DirectionForecast
@@ -40,6 +41,7 @@ class TickerCard:
     news: NewsResult | None = None
     combined: Combined | None = None
     panels: list = field(default_factory=list)      # panel.PanelOutcome
+    technical: TechnicalRead | None = None
 
     @property
     def gap(self) -> float | None:
@@ -94,6 +96,7 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
                 out["VOLATILITY"].append(
                     f"EVENT DAY: gap {c.gap:+.1%} exceeds 1 sigma ({f.sigma_next:.2f}%); "
                     f"too few similar gaps to widen the band")
+    out["TECHNICAL"] = technical_lines(c)
     out["DIRECTION"] = direction_lines(c)
     out["MODELS"] = model_lines(c)
     out["BASE RATES"] = base_rate_lines(c)
@@ -106,6 +109,33 @@ def card_lines(c: TickerCard) -> dict[str, list[str]]:
 def _age(iso: str) -> str:
     h = (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds() / 3600
     return f"{h:.0f}h ago" if h >= 1 else f"{h * 60:.0f}m ago"
+
+
+def _px(x: float | None) -> str:
+    return "n/a" if x is None else f"${x:,.2f}"
+
+
+def _dist(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:+.1%}"
+
+
+def technical_lines(c: TickerCard) -> list[str]:
+    t = c.technical
+    if t is None:
+        return ["not available"]
+    lines = [
+        f"as of {t.asof} close ${_px(t.close)[1:]} · "
+        f"MA20 {_px(t.ma20)} ({_dist(t.dist_ma20)}) · "
+        f"MA50 {_px(t.ma50)} ({_dist(t.dist_ma50)}) · "
+        f"MA200 {_px(t.ma200)} ({_dist(t.dist_ma200)})",
+        f"stack {t.stack} · RSI(14) {t.rsi14:.1f} ({t.rsi_band})" if t.rsi14 is not None
+        else f"stack {t.stack} · RSI(14) n/a",
+        f"MACD histogram {t.macd_hist_pct:+.2%} of price ({t.macd_side})" if t.macd_hist_pct is not None
+        else "MACD histogram n/a",
+        f"reference tally {t.checks_up}/{t.checks_n} above "
+        f"(close vs MA20/50/200, RSI ≥ 50, MACD histogram > 0) · combiner weight 0",
+    ]
+    return lines
 
 
 def direction_lines(c: TickerCard) -> list[str]:
@@ -228,7 +258,7 @@ def render_markdown(cards: list[TickerCard], run_meta: dict) -> str:
         sec = card_lines(c)
         lines.append(f"## {sec['head'][0]}")
         lines.append("```")
-        for name in ("VOLATILITY", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "EVENTS", "WARNINGS"):
+        for name in ("VOLATILITY", "TECHNICAL", "DIRECTION", "MODELS", "BASE RATES", "NEWS", "EVENTS", "WARNINGS"):
             for i, l in enumerate(sec[name]):
                 lines.append(f"{name if i == 0 else '':<12} {l}")
             lines.append("")
@@ -300,6 +330,27 @@ def _pct(x: float, d: int = 0, sign: bool = False) -> str:
     if x != x:  # NaN
         return "—"
     return f"{x:+.{d}%}" if sign else f"{x:.{d}%}"
+
+
+def _technical_html(c: TickerCard) -> str:
+    t = c.technical
+    parts = ['<div class="row"><div class="lbl">TECHNICAL</div><div>']
+    if t is None:
+        parts.append('<div class="small">Technical reference not available.</div></div></div>')
+        return "".join(parts)
+    e = html.escape
+    rsi = f"{t.rsi14:.1f}" if t.rsi14 is not None else "n/a"
+    macd = f"{t.macd_hist_pct:+.2%}" if t.macd_hist_pct is not None else "n/a"
+    parts.append(
+        f'<div class="kv"><span>MA20 <b>{_px(t.ma20)}</b> <span class="small">{_dist(t.dist_ma20)}</span></span>'
+        f'<span>MA50 <b>{_px(t.ma50)}</b> <span class="small">{_dist(t.dist_ma50)}</span></span>'
+        f'<span>MA200 <b>{_px(t.ma200)}</b> <span class="small">{_dist(t.dist_ma200)}</span></span>'
+        f'<span>RSI(14) <b>{rsi}</b> <span class="small">{e(t.rsi_band)}</span></span>'
+        f'<span>MACD hist <b>{macd}</b> <span class="small">{e(t.macd_side)}</span></span></div>')
+    parts.append(f'<div class="small">Stack {e(t.stack)} · reference tally <b>{t.checks_up}/{t.checks_n}</b> above '
+                 f'(close vs MA20/50/200, RSI ≥ 50, MACD histogram &gt; 0) · as of {e(t.asof)} close · '
+                 f'combiner weight 0</div></div></div>')
+    return "".join(parts)
 
 
 def _direction_html(c: TickerCard) -> str:
@@ -493,6 +544,7 @@ def render_html(cards: list[TickerCard], run_meta: dict) -> str:
                 else:
                     body.append(f'<div class="event">Event day: gap {c.gap:+.1%} exceeds one sigma; too few similar gaps to widen the band.</div>')
             body.append('</div></div>')
+        body.append(_technical_html(c))
         body.append(_direction_html(c))
         body.append(_models_html(c))
         body.append(_base_rates_html(c))

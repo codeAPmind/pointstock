@@ -8,6 +8,8 @@ News features (DESIGN.md) arrive with the news module in M4.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
@@ -116,3 +118,84 @@ def build_features(df: pd.DataFrame, market: dict[str, pd.DataFrame] | None = No
 
 def feature_columns(table: pd.DataFrame) -> list[str]:
     return [c for c in table.columns if c not in TARGET_COLS]
+
+
+@dataclass(frozen=True)
+class TechnicalRead:
+    """Last-close snapshot of the moving averages, RSI and MACD already in the feature table.
+
+    A reading aid for the report. It does not enter the combiner.
+    """
+    asof: str
+    close: float
+    ma20: float | None
+    ma50: float | None
+    ma200: float | None
+    dist_ma20: float | None
+    dist_ma50: float | None
+    dist_ma200: float | None
+    rsi14: float | None
+    macd_hist_pct: float | None
+    stack: str
+    checks_up: int
+    checks_n: int
+    rsi_band: str
+    macd_side: str
+
+
+def _cell(row: pd.Series, name: str) -> float | None:
+    if name not in row.index or pd.isna(row[name]):
+        return None
+    return float(row[name])
+
+
+def _ma_level(close: float, dist: float | None) -> float | None:
+    if dist is None:
+        return None
+    return close / (1 + dist)
+
+
+def _stack(ma20: float | None, ma50: float | None, ma200: float | None) -> str:
+    levels = (ma20, ma50, ma200)
+    if any(v is None for v in levels):
+        return "incomplete"
+    if ma20 > ma50 > ma200:
+        return "20 > 50 > 200"
+    if ma20 < ma50 < ma200:
+        return "20 < 50 < 200"
+    return "mixed"
+
+
+def _rsi_band(rsi: float | None) -> str:
+    if rsi is None:
+        return "n/a"
+    if rsi < 30:
+        return "below 30"
+    if rsi < 50:
+        return "30–50"
+    if rsi <= 70:
+        return "50–70"
+    return "above 70"
+
+
+def technical_read(table: pd.DataFrame, close: float, asof: str) -> TechnicalRead:
+    """Read MA20/50/200, RSI(14) and MACD histogram off the last feature row."""
+    row = table.iloc[-1]
+    d20, d50, d200 = _cell(row, "dist_ma20"), _cell(row, "dist_ma50"), _cell(row, "dist_ma200")
+    ma20, ma50, ma200 = _ma_level(close, d20), _ma_level(close, d50), _ma_level(close, d200)
+    rsi, macd = _cell(row, "rsi14"), _cell(row, "macd_hist_pct")
+    flags = []
+    for dist in (d20, d50, d200):
+        if dist is not None:
+            flags.append(dist > 0)
+    if rsi is not None:
+        flags.append(rsi >= 50)
+    if macd is not None:
+        flags.append(macd > 0)
+    return TechnicalRead(
+        asof=asof, close=close, ma20=ma20, ma50=ma50, ma200=ma200,
+        dist_ma20=d20, dist_ma50=d50, dist_ma200=d200, rsi14=rsi, macd_hist_pct=macd,
+        stack=_stack(ma20, ma50, ma200), checks_up=sum(flags), checks_n=len(flags),
+        rsi_band=_rsi_band(rsi),
+        macd_side="n/a" if macd is None else ("above zero" if macd > 0 else "below zero"),
+    )

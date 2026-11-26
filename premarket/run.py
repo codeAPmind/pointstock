@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="unattended mode: skip holidays, run once per session inside the pre-market window, push")
     ap.add_argument("--force", action="store_true", help="with --scheduled: ignore the time window and run stamp")
     ap.add_argument("--notify", action="store_true", help="push the summary to configured channels")
+    ap.add_argument("--resend", nargs="?", const="today", default=None, metavar="SESSION",
+                    help="re-push a saved report (failed channels only) without recomputing; "
+                         "default is today's NY session")
     args = ap.parse_args(argv)
     overrides = {k.upper(): float(v) for k, v in (o.split("=", 1) for o in args.premarket)}
 
@@ -123,10 +126,26 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     now = datetime.now(timezone.utc)
+    if args.resend is not None:
+        session = S.session_date(now) if args.resend == "today" else args.resend
+        try:
+            res = NT.resend(session, paths["data"], args.reports_dir or paths["reports"], paths["logs"])
+        except FileNotFoundError as exc:
+            print(f"resend: {exc}")
+            return 1
+        print("push: " + (", ".join(f"{k} {v}" for k, v in res.items()) or "nothing to resend"))
+        return 0
     if args.scheduled:
         go, reason = S.should_run(paths["data"], now, force=args.force)
         print(f"[scheduled] {reason}")
         if not go:
+            if "already ran" in reason:
+                session = S.session_date(now)
+                pending = NT.failed_channels(paths["data"], session)
+                if pending:
+                    print(f"[scheduled] resend {', '.join(pending)} for {session}")
+                    res = NT.resend(session, paths["data"], args.reports_dir or paths["reports"], paths["logs"])
+                    print("push: " + (", ".join(f"{k} {v}" for k, v in res.items()) or "nothing to resend"))
             return 0
     manifest = D.RunManifest()
     years, gcfg = cfg["history_years"], cfg["garch"]
@@ -166,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         sessions[t] = next_session(px.index[-1]).date().isoformat()
 
         table = F.build_features(px, market, sector=cfg.get("sector_for", {}).get(t))
+        tech = F.technical_read(table, float(px["Close"].iloc[-1]), str(px.index[-1].date()))
         feat_dir = Path(paths["data"]) / "features"
         feat_dir.mkdir(parents=True, exist_ok=True)
         table.to_parquet(feat_dir / f"{t}.parquet")
@@ -201,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                           last_date=str(px.index[-1].date()), forecast=fc, coverage=cov,
                           premarket=pm.price, premarket_asof=pm.asof_utc, warnings=warnings,
                           prior=B.unconditional_rate(px), conditions=conds, gap_rate=gr,
-                          premarket_source=pm.source)
+                          premarket_source=pm.source, technical=tech)
         # Direction models (M3): saved weekly bundle, refit inline if missing/outdated
         try:
             bundle = M.load_bundle(paths["data"], t)
@@ -254,6 +274,13 @@ def main(argv: list[str] | None = None) -> int:
                   f"{fc.regime} | 68% {fc.band68[0]:.2f}-{fc.band68[1]:.2f} | "
                   f"95% {fc.band95[0]:.2f}-{fc.band95[1]:.2f} | 68% band coverage "
                   f"{cov.inside68:.1%} over {cov.n_days}d (95%: {cov.inside95:.1%})")
+        if tech:
+            def _signed(x, spec="+.1%"):
+                return "n/a" if x is None else format(x, spec)
+            print(f"[{t}] technical MA20 {_signed(tech.dist_ma20)} MA50 {_signed(tech.dist_ma50)} "
+                  f"MA200 {_signed(tech.dist_ma200)} | RSI {_signed(tech.rsi14, '.1f')} | "
+                  f"MACD hist {_signed(tech.macd_hist_pct, '+.2%')} | "
+                  f"tally {tech.checks_up}/{tech.checks_n} | stack {tech.stack}")
         print(f"[{t}] prior P(up) {card.prior[0]:.1%} (N={card.prior[1]}) | active conditions: "
               + (", ".join(f"{r.key} N={r.n} up {r.p_up_1d:.0%}" for r in conds) or "none"))
         if card.direction:
@@ -321,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     html_path, md_path = write_reports(cards, meta, args.reports_dir or paths["reports"])
     print(f"report: {html_path}\nsummary: {md_path}\nmanifest: {run_dir / 'run_manifest.json'}")
     if args.notify or args.scheduled:
-        res = NT.push(cards, meta, html_path)
+        res = NT.push(cards, meta, html_path, data_dir=paths["data"], logs_dir=paths["logs"])
         print("push: " + (", ".join(f"{k} {v}" for k, v in res.items()) or "no channel configured"))
     if args.scheduled:
         S.mark_done(paths["data"], session, f"{len(cards)} tickers")

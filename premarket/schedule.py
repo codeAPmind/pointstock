@@ -38,6 +38,12 @@ def is_trading_day(day) -> bool:
         return pd.Timestamp(day).weekday() < 5
 
 
+def session_date(now_utc: datetime | None = None) -> str:
+    """NYSE session date for `now` (the calendar day in New York)."""
+    now_ny = (now_utc or datetime.now(timezone.utc)).astimezone(NY)
+    return now_ny.date().isoformat()
+
+
 def stamp_path(data_dir: str | Path, session: str) -> Path:
     return Path(data_dir) / "runs" / session / "DONE"
 
